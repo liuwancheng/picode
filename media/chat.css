@@ -458,6 +458,15 @@
   .md ol ol { list-style-type: lower-roman; }
   .md ol ol ol { list-style-type: lower-alpha; }
   .md pre { background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)); padding: 13px; border-radius: 6px; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); overflow-x: auto; margin: 13px 0; line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
+  .md-code { margin: 13px 0; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); border-radius: 6px; background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15)); overflow: hidden; }
+  .md-code-head { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 4px 8px 0 13px; gap: 8px; color: var(--vscode-descriptionForeground, #888); font-size: 0.8em; }
+  .md-code-head > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .code-copy { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font-size: 16px; }
+  .code-copy svg { display: block; width: 16px; height: 16px; flex: none; }
+  .code-copy:hover { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.15)); color: var(--vscode-foreground); }
+  .code-copy:focus-visible { outline: 1px solid var(--vscode-focusBorder, #007acc); outline-offset: -1px; }
+  .code-copy:disabled { cursor: default; }
+  .md .md-code > pre { margin: 0; border: 0; border-radius: 0; background: none; padding-top: 8px; }
   .md code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85em; }
   .md :not(pre) > code { background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.25)); color: var(--vscode-textPreformat-foreground, var(--vscode-foreground)); padding: 1px 0; margin: 0 2px; border-radius: 3px; box-shadow: 0.25em 0 0 var(--vscode-textCodeBlock-background, rgba(128,128,128,0.25)), -0.25em 0 0 var(--vscode-textCodeBlock-background, rgba(128,128,128,0.25)); }
   .md pre code { background: none; padding: 0; color: var(--hl-base, var(--vscode-editor-foreground, var(--vscode-foreground, #d4d4d4))); }

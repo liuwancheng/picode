@@ -290,6 +290,8 @@
   function ensureFileLink() {
     if (fileLinkReady || typeof marked === "undefined") { return; }
     fileLinkReady = true;
+    // 沿用高亮插件的代码渲染器；整段重放与流式按块解析共用这一处。
+    const renderCode = marked.defaults.renderer?.code || new marked.Renderer().code;
     marked.use({
       extensions: [{
         name: "filelink",
@@ -307,6 +309,13 @@
         renderer(t) { return fileLinkHTML(t.path, t.line, t.col, null, t.dir); },
       }],
       renderer: {
+        code(token) {
+          const html = renderCode.call(this, token);
+          const lang = (token.lang || "").trim().split(/\s+/)[0];
+          // mermaid 会把 pre 换成图，不给图留一颗无内容可复制的按钮。
+          if (lang.toLowerCase() === "mermaid") { return html; }
+          return `<div class="md-code"><div class="md-code-head"><span>${escHtml(lang)}</span><button type="button" class="code-copy" title="复制代码" aria-label="复制代码">${CODE_COPY_ICON}</button></div>${html}</div>`;
+        },
         codespan({ text }) {
           const m = FILE_RE.exec(text);
           if (m && isFilePathlike(m[1])) {
@@ -331,6 +340,43 @@
       },
     });
   }
+  const CODE_COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest?.(".code-copy");
+    if (!btn || btn.disabled) { return; }
+    const code = btn.closest(".md-code")?.querySelector("pre code");
+    if (!code) { return; }
+    e.preventDefault();
+    e.stopPropagation();
+    btn.disabled = true;
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(code.textContent);
+      copied = true;
+    } catch {
+      // 局域网 HTTP 没有 Clipboard API，仍可在这次点击里走浏览器的复制命令。
+      const focus = document.activeElement;
+      const sel = window.getSelection();
+      const ranges = sel ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i).cloneRange()) : [];
+      const input = document.createElement("textarea");
+      input.value = code.textContent;
+      input.style.cssText = "position:fixed;left:-9999px;top:0";
+      document.body.appendChild(input);
+      input.select();
+      try { copied = document.execCommand("copy"); } catch { /* 显示失败反馈，不假报成功。 */ }
+      input.remove();
+      focus?.focus({ preventScroll: true });
+      if (sel) { sel.removeAllRanges(); for (const range of ranges) { sel.addRange(range); } }
+    }
+    btn.innerHTML = copied ? "✓" : "!";
+    btn.title = btn.ariaLabel = copied ? "已复制" : "复制失败，请手动选择代码复制";
+    setTimeout(() => {
+      btn.innerHTML = CODE_COPY_ICON;
+      btn.title = btn.ariaLabel = "复制代码";
+      btn.disabled = false;
+    }, 1500);
+  });
+
   // marked 的解析选项：整段渲染与按块渲染必须用同一套，否则两种路径出来的东西会不一样。
   // 每回给一份新的：marked 会往传进去的选项对象上写东西（加 tokenizer 字段），
   // 共享或冻结的对象会直接被它撞坏（症状是静默地报错回退）。
