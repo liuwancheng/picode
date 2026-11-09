@@ -6319,9 +6319,8 @@
   //
   // 模型问的选择题（ask_choice）、扩展问的确认 / 输入 / 选一个，都长在会话的消息流里，
   // 不弹浮层、不挡别的会话：插在那条 ask_choice 工具行下面（宿主把工具调用编号一起发来了），
-  // 没得插就接在当前内容末尾。答完卡片不消失：就地定住，底下那一套按钮收掉，
-  // 选中的那几行留着高亮（自己写的 / 是或否 / 没作答这三种看不出来的才补一行字），
-  // 翻回去还看得见当时问了什么、答了什么。
+  // 没得插就接在当前内容末尾。答完收成一行「✓ 已确认：答案」，不留可点击的选项或按钮；
+  // 完整问答放在悬停提示里，翻回去仍能看见当时答了什么。
   //
   // 三种长相（宿主给的 card.kind）：
   //   choice   标题 + 几行选项（单选点一行就是答案；多选勾完按「确定」）+ 可选的"自己写"一行
@@ -6333,44 +6332,43 @@
   // 在这块屏上打字答的（在那行输入框里按的回车），答完把光标放回下面那个输入框：接着就能
   // 打字，手机上软键盘也跟着留住（见 submitAskCard）。点选项 / 点按钮答的不动光标。
 
-  /**
-   * 这张卡片底下要写的那行结果；空串 = 不用写（选中那几行留着高亮就够了）。
-   * 自己写的那句、是 / 否、没作答这三样没法用高亮表示，得写出来。
-   */
+  /** 已提交的答案摘要：多选与自己写的内容一起保留。 */
   function askAnswerText(rec, answer) {
-    if (!answer || answer.cancelled === true) { return "没作答"; }
-    if (rec.kind === "confirm") { return answer.yes === true ? "你答：是" : "你答：否"; }
+    if (!answer || answer.cancelled === true) { return "未作答"; }
+    if (rec.kind === "confirm") { return answer.yes === true ? "是" : "否"; }
     const text = String(answer.text || "").trim();
-    if (rec.kind === "prompt") { return text ? "你写的是：" + text : "你没写内容"; }
-    // 单选 / 多选：选的是哪几行已经留在那儿亮着了，不用再把它们重说一遍
-    return text ? "你自己写的是：" + text : "";
+    if (rec.kind === "prompt") { return text || "（空内容）"; }
+    const parts = Array.isArray(answer.picks) ? answer.picks.map(String) : [];
+    if (text) { parts.push("自己写：" + text); }
+    return parts.join("；") || "未作答";
   }
 
-  /**
-   * 答完了（自己答的 / 别的屏答的 / 到点）：这张卡片定住。
-   * 交互那一块（按钮、输入行、说明）整个收掉 —— 点完就已经回复了，不用留一堆按不动的按钮；
-   * 选中的那几行留着高亮，要不要再写一行结果见 askAnswerText。
-   */
+  /** 自己答的 / 别的屏答的 / 到点都走这里：折叠成只读摘要，不留交互控件。 */
   function settleAskCard(st, id, answer) {
     const rec = id ? st.askCards.get(id) : undefined;
     if (!rec || rec.done) { return; }
     rec.done = true;
     const el = rec.el;
     el.classList.add("done");
-    el.querySelectorAll(".ask-foot, .ask-input").forEach((node) => { node.remove(); });
+    const question = [el.querySelector(".ask-title")?.textContent, el.querySelector(".ask-body")?.textContent].filter(Boolean).join("\n");
+    // 移除前也禁用，已持有旧按钮引用的点击同样不能重交（submitAskCard 还有 done 守卫）。
+    el.querySelectorAll("button, input").forEach((node) => { node.disabled = true; });
     rec.okBtn = null;
     rec.input = null;
-    const picks = answer && Array.isArray(answer.picks) ? answer.picks : [];
-    el.querySelectorAll(".ask-opt").forEach((b) => {
-      if (picks.indexOf(b.dataset.opt || "") >= 0) { b.classList.add("picked"); }
-    });
-    const text = askAnswerText(rec, answer);
-    if (text) {
-      const line = document.createElement("div");
-      line.className = "ask-answer";
-      line.textContent = text;
-      el.appendChild(line);
-    }
+    const confirmed = !!answer && answer.cancelled !== true && (rec.kind !== "choice" ||
+      (Array.isArray(answer.picks) && answer.picks.length > 0) || String(answer.text || "").trim().length > 0);
+    const line = document.createElement("div");
+    line.className = "ask-answer";
+    const status = document.createElement("span");
+    status.className = "ask-status" + (confirmed ? " confirmed" : "");
+    status.textContent = confirmed ? "✓ 已确认：" : "○ ";
+    const text = document.createElement("span");
+    text.className = "ask-answer-text";
+    text.textContent = askAnswerText(rec, answer);
+    line.append(status, text);
+    el.replaceChildren(line);
+    el.title = question + "\n" + line.textContent;
+    el.setAttribute("aria-label", el.title);
     scrollToBottom(st);
   }
 

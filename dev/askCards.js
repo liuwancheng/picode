@@ -5,7 +5,7 @@
  * 假 pi 照剧本演：模型调 ask_choice（走真协议：工具调用 → stderr 暗号 → 回话文件 → 工具结果），
  * 以及扩展在中间问用户（extension_ui_request：确认 / 输入 / 选一个）。
  * 卡片该长在那条 ask_choice 工具行下面；单选点一行就走，多选勾完按「确定」，答完卡片定住、
- * 选中的那几行留着高亮（见 dev/README.md）。
+ * 折叠为「✓ 已确认：答案」，移除所有交互控件（见 dev/README.md）。
  *
  *   npm run web:shot -- --fake-pi --script dev/askCards.js
  * 图落在 dev/shots/。
@@ -41,7 +41,16 @@ async function waitDone(page, least, timeoutMs) {
     const t0 = Date.now();
     for (;;) {
         const n = await page.eval(`return document.querySelectorAll(".ask-card.done").length;`);
-        if (n >= least) { return n; }
+        if (n >= least) {
+            check("答完卡片只留一行只读摘要", await page.eval(`
+                return Array.from(document.querySelectorAll('.ask-card.done')).every(c =>
+                    c.children.length === 1 && !!c.querySelector('.ask-answer-text') &&
+                    !c.querySelector('button, input, .ask-opts, .ask-foot') &&
+                    c.title.includes(c.querySelector('.ask-answer-text').textContent) &&
+                    getComputedStyle(c.querySelector('.ask-answer-text')).whiteSpace === 'nowrap');
+            `));
+            return n;
+        }
         if (Date.now() - t0 > timeoutMs) {
             throw new Error(`等 ${timeoutMs} 毫秒也没等到第 ${least} 张答完的卡片（现在 ${n} 张）`);
         }
@@ -76,9 +85,12 @@ module.exports = async (page) => {
     await waitCards(page, 1, 30000);
     await page.sleep(300);
     await page.shot("ask-card-single.png");
-    await page.eval(inLastCard(`c.querySelector(".ask-input").focus();`));
+    const single = await page.eval(lastCardValue(`return c.querySelector('.ask-opt').dataset.opt;`));
+    await page.eval(inLastCard(`c.querySelector(".ask-input").focus(); window.__oldAskOption = c.querySelector('.ask-opt');`));
     await clickInLastCard(page, ".ask-opt");
     await waitDone(page, 1, 20000);
+    check("单选显示已确认与完整答案", await page.eval(`const c = document.querySelector('.ask-card.done'); return c.textContent === ${JSON.stringify('✓ 已确认：')} + ${JSON.stringify(single)};`));
+    check("旧选项也已禁用，重复点击不改变摘要", await page.eval(`const b = window.__oldAskOption; const c = document.querySelector('.ask-card.done'); const before = c.textContent; b.click(); c.click(); return b.disabled && !b.isConnected && c.textContent === before;`));
     check("点选项答的不把光标搬到下面那个输入框里",
         (await page.eval(`return document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : "";`)) !== "input",
         String(await page.eval(`return document.activeElement && (document.activeElement.id || document.activeElement.className);`)));
@@ -178,6 +190,28 @@ module.exports = async (page) => {
     await waitDone(page, 1, 20000);
     await page.sleep(1200);
     await page.shot("ask-card-reload-done.png");
+
+    // 其他屏作答 / 重放：答案由宿主送来，也收成同样的只读摘要。
+    const card = { kind: 'choice', question: '是否扩大到完整 CPP 的必要编译修补？', options: ['允许修补 GeoCheck.cpp 及必要的本库声明，继续完整 ARM 对照和接收', '仍限定 TriangleBox'], multi: true, allowText: true };
+    const answer = { picks: card.options, text: '保留原库算法 <不重写>' };
+    await page.eval(`
+        const card = ${JSON.stringify(card)}, answer = ${JSON.stringify(answer)};
+        window.postMessage({type:'askCard', id:'collapse-replay', card}, '*');
+        window.postMessage({type:'askCardDone', id:'collapse-replay', answer}, '*');
+        return true;
+    `);
+    await page.sleep(300);
+    check('其他屏作答保留多选和自己写的内容', await page.eval(`const c = document.querySelector('[data-ask-id="collapse-replay"]'); return c.classList.contains('done') && c.querySelector('.ask-answer-text').textContent === ${JSON.stringify(card.options.join('；') + '；自己写：' + answer.text)} && !c.querySelector('button, input') && c.title.includes(${JSON.stringify(card.question)});`));
+    await page.eval(`window.postMessage({type:'askCard', id:'collapse-replay', card:${JSON.stringify(card)}}, '*'); return true;`);
+    await page.sleep(300);
+    check('重复补发卡片不恢复交互', await page.eval(`const c = document.querySelector('[data-ask-id="collapse-replay"]'); return c.classList.contains('done') && !c.querySelector('button, input');`));
+    await page.eval(`window.postMessage({type:'askCard', id:'collapse-cancel', card:${JSON.stringify(card)}}, '*'); window.postMessage({type:'askCardDone', id:'collapse-cancel', answer:{cancelled:true}}, '*'); return true;`);
+    await page.sleep(300);
+    check('取消不显示已确认', await page.eval(`const c = document.querySelector('[data-ask-id="collapse-cancel"]'); return c.textContent.includes('未作答') && !c.textContent.includes('已确认') && !c.querySelector('button, input');`));
+    await page.eval(`window.postMessage({type:'askCard', id:'collapse-empty', card:${JSON.stringify(card)}}, '*'); window.postMessage({type:'askCardDone', id:'collapse-empty', answer:{picks:[],text:''}}, '*'); return true;`);
+    await page.sleep(300);
+    check('空答案不显示已确认', await page.eval(`const c = document.querySelector('[data-ask-id="collapse-empty"]'); return c.textContent.includes('未作答') && !c.textContent.includes('已确认');`));
+    await page.shot('ask-card-collapsed.png');
 
     console.log("---- 页面上剩下的文字 ----");
     console.log(await page.text());

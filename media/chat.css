@@ -1416,16 +1416,14 @@
 
   /* ==== 问话卡片（长在消息流里：模型问的选择题、扩展问的确认 / 输入 / 选一个）====
      它不是气泡，是一块带边的盒子：一眼看得出“这里要你答一句”，但跟别的消息一样跟着流走、跟着滚。
-     答完加 .done：整体转淡、按钮按不动，底下多一行 .ask-answer 写着答了什么（见 chat.js 的 settleAskCard）。 */
+     答完加 .done：收成一行只读摘要，完整问答在悬停提示里（见 chat.js 的 settleAskCard）。 */
   .ask-card {
     margin: 10px 14px; padding: 10px 12px;
     border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
     border-radius: 8px;
     background: var(--vscode-editorWidget-background, rgba(128,128,128,0.06));
   }
-  .ask-card.done .ask-opt { opacity: 0.6; }
-  /* 答完：选中的那几行留着清清楚楚（没选的那几行发淡），一眼看得出当时选了什么 */
-  .ask-card.done .ask-opt.picked { opacity: 1; }
+  .ask-card.done { padding: 8px 12px; cursor: default; }
   .ask-title { font-weight: 600; line-height: 1.45; }
   .ask-body { margin-top: 6px; white-space: pre-wrap; line-height: 1.5; opacity: 0.85; }
   .ask-opts { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
@@ -1437,12 +1435,8 @@
   }
   .ask-opt:hover:not(:disabled) { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.18)); }
   .ask-opt:disabled { cursor: default; }
-  /* 多选勾中的那一行（.on）与答完后选中的那一行（.picked） */
+  /* 多选勾中的那一行；提交后选项整个移除。 */
   .ask-opt.on { border-color: var(--vscode-focusBorder, #007acc); }
-  .ask-opt.picked {
-    background: color-mix(in srgb, var(--vscode-button-background, #007acc) 16%, transparent);
-    border-color: var(--vscode-focusBorder, #007acc);
-  }
   .ask-opt-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   /* “我推荐”那个小标记：接在选项文字后面 */
   .ask-rec {
@@ -1468,10 +1462,10 @@
   .ask-btn.primary { background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #fff); border-color: var(--vscode-button-background, #007acc); }
   .ask-btn.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, #1177bb); }
   .ask-btn:disabled { opacity: 0.5; cursor: default; }
-  .ask-answer {
-    margin-top: 8px; padding-top: 6px; font-size: 0.9em; opacity: 0.85; white-space: pre-wrap;
-    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
-  }
+  .ask-answer { display: flex; align-items: baseline; gap: 4px; min-width: 0; font-size: 0.9em; line-height: 1.5; }
+  .ask-status { flex: none; white-space: nowrap; color: var(--vscode-descriptionForeground, #888); }
+  .ask-status.confirmed { color: var(--vscode-testing-iconPassed, #388a34); }
+  .ask-answer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* 输入框顶边上那条：从左到右三样排成一行（横排）—— 跑着时的状态图、中间一条用量横杠
      （填到哪儿就是用了多少）、右头写这一轮的生成速度。
