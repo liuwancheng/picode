@@ -64,6 +64,13 @@ node dev/remoteNote.mjs http://127.0.0.1:51999 ask
 # 同一个名字只出一个标签（标签停在第一次调用的位置），不同名的各占一个，一条线上还是能排好几个
 npm run web:shot -- --width 1000 --height 620 --script dev/toolRow.js
 
+# 验提问消息与回答的布局（假数据，不调模型）：短句靠右收窄、长句最多占正文 85%、
+# 轮次留白、工具标签靠左、连续提问、长路径折行与长文本展开 / 收起；浅深色和窄窗各看一遍：
+npm run web:shot -- --fake-pi --width 1000 --height 900 --script dev/userMessageLayout.js
+npm run web:shot -- --fake-pi --theme dark --width 1000 --height 900 --script dev/userMessageLayout.js
+npm run web:shot -- --fake-pi --width 420 --height 900 --script dev/userMessageLayout.js
+npm run web:shot -- --fake-pi --width 1600 --height 900 --script dev/userMessageLayout.js
+
 # 验合并本身（同名的收成一个、点开的提示框里一条条列出各条的调用、write / edit 也按名字收且
 # 每条的「跳转 / 回滚」排在各自的标题行上、读图那条摘出去、不合并的那几个、重放后一样，
 # 读图铺出来的那块图排在这条调用当时的位置上：后面接着调的、后面才到的正文都在它下面）：

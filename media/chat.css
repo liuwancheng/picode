@@ -315,9 +315,21 @@
   .symbol-link:hover { text-decoration: underline; opacity: 0.85; }
   .msg { margin: 10px 0; padding: 10px 14px; word-wrap: break-word; }  .msg-enter { animation: msg-enter 250ms ease-out backwards; }
   @keyframes msg-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-  .user { white-space: pre-wrap; background: color-mix(in srgb, var(--vscode-button-background) 18%, transparent); color: var(--vscode-foreground); border-radius: 8px; }
-  /* 用户消息气泡左右缩进，外缘与 AI 回复文本对齐（pane padding 8px + msg padding 14px） */
-  .msg.user { margin: 10px 14px; }
+  /* 提问靠右、短句随内容收窄，回答和工具标签仍靠左：不用读文字也能认出谁在说话。
+     宽度上限按正文左右各 14px 的留白算（包含内边距），长问题也留下左侧空当。
+     宽窗的右边距还包含居中阅读列外的留白，让提问右边与回答正文的右边对齐。
+     中性色随主题走，不再像正文里横贯一行的蓝色强调条；只拉开轮次，不拉松回答内部。 */
+  .msg.user {
+    box-sizing: border-box; width: fit-content;
+    max-width: calc(min(100% - 28px, var(--pichat-content-max)) * 0.85);
+    margin: 32px max(14px, calc((100% - var(--pichat-content-max)) / 2)) 20px auto;
+    padding: 10px 16px;
+    white-space: pre-wrap; overflow-wrap: anywhere; text-align: left; line-height: 1.6;
+    background: color-mix(in srgb, var(--vscode-foreground) 8%, var(--vscode-editor-background));
+    color: var(--vscode-foreground); border-radius: 16px;
+  }
+  /* 第一条前面没有上一轮；连续补充提问也不用再隔出一整轮的空当。 */
+  .msg.user:first-child, .msg.user + .msg.user { margin-top: 12px; }
   .assistant { position: relative; background: none; padding: 10px 14px; }
   /* 鼠标停在正文上，右下角写这条消息的时刻（原先那个复制按钮的位置，现在已经撤掉）。
      不占布局位置、不挡鼠标：只是浮现一行小字。 */
@@ -1574,14 +1586,14 @@
      居中，别让一行字横贯整屏。窗口本身没这么宽时（手机、VSCode 插件面板）这段整个不成立，
      看着跟以前一模一样 —— 这是这套样式存在的理由，别把 900px 那道门槛去掉。
 
-     限的是窗格里的东西（.session-pane 的直接孩子）：正文、用户气泡、系统提示、工具标签行、
-     问话卡片、图片块、顶上那颗「加载更早的消息」、末尾那条「继续」。唯独 .session-loading
-     不能收 —— 它是铺满整个窗格的加载层，收窄了会把底下的消息露出来。
+     限的是窗格里的东西（.session-pane 的直接孩子）：正文、系统提示、工具标签行、
+     问话卡片、图片块、顶上那颗「加载更早的消息」、末尾那条「继续」。提问消息由 .msg.user
+     按这份阅读宽度单独靠右，不跟着居中；.session-loading 是铺满整个窗格的加载层，也不能收。
      滚动条挂在窗格上、不跟内容一起居中，所以这一列比窗口正中偏左 3 像素左右，肉眼看不出来。 */
   /* 这一列的宽度：想改宽改窄就动这一个数（大约 53 个汉字一行）。 */
   :root { --pichat-content-max: 920px; }
   @media (min-width: 900px) {
-    .session-pane > :not(.session-loading) {
+    .session-pane > :not(.session-loading, .user) {
       max-width: var(--pichat-content-max);
       margin-left: auto; margin-right: auto;
     }
