@@ -45,6 +45,8 @@ const RECENT_TURNS = 3;
 
 /** 自己起的标题记在会话里的哪一条（见 pi.appendEntry；重启以后靠它认出「这名字是我起的」）。 */
 const OWN_TITLE_ENTRY = "pichat.title";
+/** 手动命名是会话级的，不随分支导航清掉；与历史改名写入的记号一致。 */
+const MANUAL_TITLE_ENTRY = "pichat.title.manual";
 
 /** 起标题这一次最多花多少输出 token（思考也算在里面，见 withoutThinking 的说明）。 */
 const TITLE_MAX_TOKENS = 512;
@@ -184,11 +186,31 @@ function withoutThinking(model) {
 
 export default function titleBridge(pi) {
     let generating = false;
+    let manual = false;
+    let ownChanges = 0;
+
+    pi.on("session_start", (_event, ctx) => {
+        manual = ctx.sessionManager.getEntries().some((entry) =>
+            entry.type === "custom" && entry.customType === MANUAL_TITLE_ENTRY);
+    });
+    pi.on("session_info_changed", (event) => {
+        // setSessionName 每次都会发事件，包括同名。计数而不是短暂的布尔锁：
+        // 其它扩展的异步事件处理可能让本回调晚于 setSessionName 返回。
+        if (ownChanges > 0) { ownChanges--; return; }
+        manual = true;
+        pi.appendEntry(MANUAL_TITLE_ENTRY, { name: event.name });
+    });
 
     pi.on("agent_settled", async (_event, ctx) => {
-        if (generating || !ctx.model || !ctx.isIdle()) {
+        if (manual || generating || !ctx.model || !ctx.isIdle()) {
             return;
         }
+        const entries = ctx.sessionManager.getEntries();
+        // 也看追加顺序：同名手改仍有新 session_info，异步事件尚未到也不能抢先覆盖。
+        const lastInfo = entries.findLastIndex((entry) => entry.type === "session_info");
+        const lastOwn = entries.findLastIndex((entry) => entry.type === "custom" && entry.customType === OWN_TITLE_ENTRY);
+        if (lastInfo > lastOwn) { return; }
+        const revision = lastInfo >= 0 ? entries[lastInfo].id : undefined;
         const branch = ctx.sessionManager.getBranch();
         const rounds = roundCount(branch);
         // 到了节点才起名字；还没到下一个节点（或者上一个节点已经起过了）就什么都不做
@@ -237,9 +259,12 @@ export default function titleBridge(pi) {
                     .map((block) => block.text)
                     .join("\n"),
             );
-            // 这个短请求发出去以后，用户可能自己 /name 改过名了：名字变了就不覆盖。
-            if (title && pi.getSessionName() === before) {
-                pi.setSessionName(title);
+            // 这个短请求发出去以后，用户可能手动改名了：同名也算，按元数据版本判。
+            const latestInfo = ctx.sessionManager.getEntries().findLast((entry) => entry.type === "session_info");
+            if (title && !manual && latestInfo?.id === revision && pi.getSessionName() === before) {
+                ownChanges++;
+                try { pi.setSessionName(title); }
+                catch (error) { ownChanges--; throw error; }
                 // 记一笔：下次靠它认出这个名字是自己起的
                 pi.appendEntry(OWN_TITLE_ENTRY, { title, round: due });
             }

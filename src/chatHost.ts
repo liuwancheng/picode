@@ -32,6 +32,9 @@ import {
     listSessionFiles,
     readProjectEntry,
     rememberProjectDir,
+    scanSessionInfo,
+    normalizeSessionName,
+    renameHistorySession,
     type ProjectDirEntry,
 } from "./sessionStore";
 import { listDirectories } from "./dirBrowse";
@@ -495,6 +498,52 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         // 目录，手里那份清单丢掉、重推时现扫；别的工作区那份留着（见 sessionStore.dropSessionFileLists）
         dropSessionFileLists(Array.from(touched));
         void this.refreshWorkspacePanels();
+    }
+
+    /** 改名回执只给发起页面；标题广播按文件定位，不切任何页面的当前会话。 */
+    private async renameWorkspaceSession(msg: any, clientId: string): Promise<void> {
+        const file = typeof msg.path === "string" ? msg.path : "";
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        let name = typeof msg.name === "string" ? msg.name : "";
+        try {
+            name = normalizeSessionName(msg.name);
+            const cwd = typeof msg.cwd === "string" ? msg.cwd : "";
+            if (!requestId || !path.isAbsolute(file) || !path.isAbsolute(cwd)) {
+                throw new Error("改名请求缺少会话路径、工作区或请求编号");
+            }
+            const key = dirKey(file);
+            const running = () => Array.from(this.panels.values()).find((rt) =>
+                dirKey(rt.currentSessionPath || "") === key || dirKey(rt.loadingSessionPath || "") === key);
+            let rt = running();
+            if (rt && dirKey(rt.cwd) !== dirKey(cwd)) { throw new Error("会话不属于这个工作区"); }
+            // 只接受本工作区的清单条目或宿主正在使用的路径；绝不接受任意 jsonl 文件。
+            const known = rt
+                ? (dirKey(rt.loadingSessionPath || "") === key ? rt.loadingSessionPath : rt.currentSessionPath)
+                : (await listSessionFiles(cwd)).find((entry) => dirKey(entry.file) === key)?.file;
+            if (!known) { throw new Error("找不到这个工作区的会话"); }
+            const info = await scanSessionInfo(known);
+            if (!info) { throw new Error("会话文件尚未落盘或无法读取，请稍后重试"); }
+            if (dirKey(info.cwd) !== dirKey(cwd)) { throw new Error("会话文件与工作区不匹配"); }
+            rt = running();   // 读盘这会儿可能有人刚打开了它：仍走原生 RPC，不从外面写活动文件。
+            if (rt) {
+                if (dirKey(rt.cwd) !== dirKey(cwd)) { throw new Error("会话不属于这个工作区"); }
+                await rt.renameSession(rt.currentSessionPath!, name);
+            } else {
+                await renameHistorySession(known, name, () => {
+                    if (running()) { throw new Error("会话刚被打开，请重试"); }
+                });
+            }
+            dropSessionFileLists([cwd]);
+            // 列表照旧重推；历史按文件原地更新，避免重推工作区把加载更多得到的历史丢掉。
+            this.broadcastSessionList(true);
+            this.postToWebview({ type: "sessionTitleChanged", file, cwd, name });
+            this.sendToOneClient(clientId, { type: "sessionRenamed", requestId, file, name });
+        } catch (error: any) {
+            this.sendToOneClient(clientId, {
+                type: "sessionRenamed", requestId, file, name,
+                error: error?.message || "会话改名失败",
+            });
+        }
     }
 
     /** 面板里点了一行会话：切过去（要不要关面板是界面的事：常驻那一列不关）。
@@ -1404,6 +1453,9 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
                 // 带 expanded = 界面展开着的那几个目录：它们的头一批会话一块带回来，面板一画就是整的。
                 if (msg.dock === true) { void this.showDockedWorkspacePanel(this.currentPageId, openWorkspaceDirs(msg)); return true; }
                 void this.showWorkspacePicker(this.currentPageId, openWorkspaceDirs(msg));
+                return true;
+            case "renameSession":
+                void this.renameWorkspaceSession(msg, this.currentPageId);
                 return true;
             case "workspaceOpenSession":
                 // 常驻那一列里点了一行会话（那一列不关，所以不走 pickerChoice）；

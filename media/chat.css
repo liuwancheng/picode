@@ -1123,6 +1123,61 @@
   @media (hover: none) {
     .pk-host.pk-workspace .pk-item.pk-space .pk-space-add { opacity: 0.55; }
   }
+  /* 会话行的「…」：电脑上悬停 / 键盘聚焦才露，触屏常显。 */
+  .pk-host .pk-session-more {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 20px; padding: 0; border: 0; border-radius: 4px;
+    background: transparent; color: inherit; opacity: 0; cursor: pointer;
+  }
+  .pk-host .pk-item:hover .pk-session-more,
+  .pk-host .pk-item:focus-within .pk-session-more,
+  .pk-host .pk-session-more[aria-expanded="true"] { opacity: 0.8; }
+  .pk-host .pk-session-more:hover { opacity: 1; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.2)); }
+  @media (hover: none) { .pk-host .pk-session-more { opacity: 0.65; } }
+  .session-menu {
+    position: fixed; z-index: 1005; min-width: 160px; padding: 4px;
+    background: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--vscode-editor-background)));
+    color: var(--vscode-menu-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+    border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+  }
+  .session-menu button {
+    display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px;
+    border: 0; border-radius: 4px; background: transparent; color: inherit;
+    font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+  }
+  .session-menu button:hover, .session-menu button:focus-visible {
+    background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15));
+  }
+  #sessionRenameOverlay {
+    position: fixed; inset: 0; z-index: 1006; padding: 16px;
+    display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.35);
+  }
+  .session-rename-panel {
+    box-sizing: border-box; width: min(400px, 100%); padding: 20px; border-radius: 10px;
+    background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+    box-shadow: 0 6px 24px rgba(0,0,0,0.25);
+  }
+  .session-rename-panel h2 { font-size: 16px; margin: 0 0 18px; font-weight: 600; }
+  .session-rename-panel label { display: block; font-size: 12px; margin-bottom: 6px; }
+  .session-rename-panel input {
+    box-sizing: border-box; width: 100%; padding: 8px 10px; border-radius: 5px; font: inherit;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground, inherit);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+  }
+  .session-rename-panel input:focus { outline: 1px solid var(--vscode-focusBorder, #007acc); }
+  .session-rename-error { min-height: 18px; margin-top: 6px; font-size: 12px; color: var(--vscode-errorForeground, #f14c4c); }
+  .session-rename-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .session-rename-buttons button {
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.4)); border-radius: 5px;
+    padding: 6px 16px; font: inherit; font-size: 13px; cursor: pointer;
+    background: transparent; color: inherit;
+  }
+  .session-rename-buttons .session-rename-save {
+    background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #fff); border-color: transparent;
+  }
+  .session-rename-buttons button:disabled { opacity: 0.5; cursor: default; }
   /* 底部「设置」：左下角一颗安静的幽灵按钮，不再占满整行 */
   .pk-host.pk-drawer .pk-footer.pk-history-footer { padding: 6px 10px; }
   .pk-host.pk-drawer .pk-footer.pk-history-footer button {

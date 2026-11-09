@@ -10232,6 +10232,12 @@
           close.addEventListener("click", (e) => { e.stopPropagation(); askCloseSession(item.sessionId); });
           el.appendChild(close);
         }
+        if (!item.pendingClose && item.depth === 0) {
+          const session = sessions.get(item.sessionId);
+          if (session && session.sessionFile) {
+            el.insertBefore(sessionActions({ file: session.sessionFile, cwd: session.cwd, title: item.label }), el.lastChild);
+          }
+        }
         el.title = tooltipWithCwd(item.label, item.cwd);
       } else if (st.kind === "history" || (st.kind === "workspace" && item.__section === "groupSession")) {
         el.classList.add("pk-history");
@@ -10250,6 +10256,7 @@
         // 会话数不显示（那个数字对看列表没用，还容易被当成未读数）
         if (item.lastActivity) { const age = document.createElement("span"); age.className = "pk-history-age"; age.textContent = pickerRelTime(item.lastActivity); right.appendChild(age); }
         if (right.childNodes.length) { main.appendChild(right); }
+        main.appendChild(sessionActions(item));
         el.appendChild(main);
         el.title = item.title || "";
       } else if (st.kind === "options") {
@@ -10335,6 +10342,161 @@
       sectionPane.appendChild(el);
     });
   }
+  // 会话行的「…」菜单与改名弹窗：独立于拾取器，不切会话、不把名字发给模型。
+  let sessionMenu = null;
+  let sessionRename = null;
+
+  function sessionActions(item) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "pk-session-more"; button.dataset.file = item.file || "";
+    button.title = "会话操作"; button.setAttribute("aria-label", "会话操作：" + (item.title || "会话"));
+    button.setAttribute("aria-haspopup", "menu"); button.setAttribute("aria-expanded", "false");
+    button.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3" cy="8" r="1"/><circle cx="8" cy="8" r="1"/><circle cx="13" cy="8" r="1"/></svg>';
+    button.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const wasOpen = sessionMenu && sessionMenu.anchor === button;
+      closeSessionMenu();
+      if (wasOpen) { return; }
+      const menu = document.createElement("div"); menu.className = "session-menu"; menu.setAttribute("role", "menu");
+      const rename = document.createElement("button"); rename.type = "button"; rename.setAttribute("role", "menuitem");
+      rename.innerHTML = ICONS.edit + "<span>重命名</span>";
+      rename.addEventListener("click", () => { closeSessionMenu(); openSessionRename(item, button); });
+      menu.appendChild(rename); document.body.appendChild(menu);
+      button.setAttribute("aria-expanded", "true");
+      sessionMenu = { el: menu, anchor: button };
+      const r = button.getBoundingClientRect();
+      const box = menu.getBoundingClientRect();
+      menu.style.left = Math.max(8, Math.min(r.right - box.width, window.innerWidth - box.width - 8)) + "px";
+      menu.style.top = Math.max(8, r.bottom + box.height + 8 > window.innerHeight ? r.top - box.height - 4 : r.bottom + 4) + "px";
+      rename.focus({ preventScroll: true });
+    });
+    return button;
+  }
+
+  function closeSessionMenu(restoreFocus) {
+    if (!sessionMenu) { return; }
+    const { el, anchor } = sessionMenu;
+    sessionMenu = null;
+    anchor.setAttribute("aria-expanded", "false"); el.remove();
+    if (restoreFocus && anchor.isConnected) { anchor.focus({ preventScroll: true }); }
+  }
+
+  function closeSessionRename() {
+    if (!sessionRename) { return; }
+    const { el, anchor, origin, file, timer } = sessionRename;
+    sessionRename = null;
+    clearTimeout(timer); el.remove();
+    // 标题更新会重画会话行；按文件找回那颗「…」，不把窄窗里的焦点送到底下的对话输入框。
+    const replacement = origin && Array.from(origin.querySelectorAll(".pk-session-more")).find((button) => samePath(button.dataset.file, file));
+    const target = anchor && anchor.isConnected ? anchor : replacement;
+    if (target && target.getClientRects().length) { target.focus({ preventScroll: true }); }
+    else if (origin && origin.getClientRects().length) {
+      const panel = origin.querySelector(".pk-panel") || origin;
+      panel.tabIndex = -1; panel.focus({ preventScroll: true });
+    }
+  }
+
+  function openSessionRename(item, anchor) {
+    closeSessionRename();
+    const el = document.createElement("div"); el.id = "sessionRenameOverlay";
+    el.innerHTML = '<form class="session-rename-panel" role="dialog" aria-modal="true" aria-labelledby="sessionRenameHeading">' +
+      '<h2 id="sessionRenameHeading">重命名会话</h2><label for="sessionRenameInput">会话名称</label>' +
+      '<input id="sessionRenameInput" maxlength="200" autocomplete="off" enterkeyhint="done">' +
+      '<div class="session-rename-error" role="alert"></div><div class="session-rename-buttons">' +
+      '<button type="button" class="session-rename-cancel">取消</button><button type="submit" class="session-rename-save">保存</button></div></form>';
+    const form = el.querySelector("form");
+    const input = el.querySelector("input");
+    const save = el.querySelector(".session-rename-save");
+    const error = el.querySelector(".session-rename-error");
+    input.value = item.title || "";
+    const rec = { el, anchor, origin: anchor && anchor.closest(".pk-host"), file: item.file, input, save, error, composing: false, requestId: "", timer: null };
+    sessionRename = rec;
+    const showError = (text) => {
+      rec.requestId = ""; clearTimeout(rec.timer);
+      input.disabled = false; save.disabled = !input.value.trim(); save.textContent = "保存";
+      error.textContent = text; input.focus();
+    };
+    rec.showError = showError;
+    save.disabled = !input.value.trim();
+    input.addEventListener("input", () => { save.disabled = !input.value.trim(); error.textContent = ""; });
+    input.addEventListener("compositionstart", () => { rec.composing = true; });
+    input.addEventListener("compositionend", () => { rec.composing = false; });
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || rec.composing || e.isComposing || e.keyCode === 229) { return; }
+      e.preventDefault(); form.requestSubmit();
+    });
+    el.querySelector(".session-rename-cancel").addEventListener("click", closeSessionRename);
+    el.addEventListener("keydown", (e) => e.stopPropagation());
+    el.addEventListener("click", (e) => { if (e.target === el) { closeSessionRename(); } });
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      if (rec.requestId || rec.composing) { return; }
+      const name = input.value.trim();
+      if (!name) { showError("请输入会话名称"); return; }
+      rec.requestId = "rename-" + Date.now() + "-" + Math.random().toString(36).slice(2);
+      input.disabled = true; save.disabled = true; save.textContent = "保存中…";
+      rec.timer = setTimeout(() => { if (sessionRename === rec) { showError("没有收到保存结果，请重试"); } }, 15000);
+      vscode.postMessage({ type: "renameSession", requestId: rec.requestId, path: item.file, cwd: item.cwd || "", name });
+    });
+    document.body.appendChild(el);
+    input.focus(); input.select();
+  }
+
+  function applySessionRenamed(msg) {
+    const rec = sessionRename;
+    if (rec && rec.requestId && msg.requestId === rec.requestId) {
+      if (msg.error) { rec.showError(msg.error); }
+      else { closeSessionRename(); }
+    }
+    if (msg.type !== "sessionTitleChanged" || !msg.file || typeof msg.name !== "string") { return; }
+    for (const st of sessions.values()) {
+      if (samePath(st.sessionFile, msg.file)) { st.piTitle = msg.name; }
+    }
+    [dockView, modalView].forEach((view) => {
+      const st = view.state;
+      if (!st || (st.kind !== "workspace" && st.kind !== "history")) { return; }
+      const update = (items) => items.forEach((it) => { if (samePath(it.file, msg.file)) { it.title = msg.name; } });
+      update(st.items);
+      if (st.groups) {
+        st.groups.forEach((g, key) => {
+          // 改名会改变文件的磁盘排序：别的页面把游标之前没见过的会话移到前面时，重新取第一页。
+          // 本来就在已加载范围里的那条只原地改名（分页边界没变，不丢已加载的行）。
+          if (msg.cwd && key === normPathKey(msg.cwd) && !g.items.some((it) => samePath(it.file, msg.file))) { g.loaded = false; }
+          update(g.items);
+        });
+      }
+      if (st.kind === "workspace") { rebuildWorkspaceItems(view); }
+      repaintPickerPanel(view);
+    });
+    renderSessionBar();
+  }
+
+  document.addEventListener("pointerdown", (e) => {
+    if (sessionMenu && !sessionMenu.el.contains(e.target) && !sessionMenu.anchor.contains(e.target)) { closeSessionMenu(); }
+  }, true);
+  document.addEventListener("scroll", (e) => {
+    // 只有会话行所在的清单滚动才收菜单；生成时对话自动滚到底，不该把这边的菜单关掉。
+    if (sessionMenu && e.target.contains && e.target.contains(sessionMenu.anchor)) { closeSessionMenu(); }
+  }, true);
+  window.addEventListener("resize", () => closeSessionMenu());
+  document.addEventListener("keydown", (e) => {
+    if (!sessionRename && !sessionMenu) { return; }
+    if (sessionRename && (e.isComposing || e.keyCode === 229 || sessionRename.composing) && (e.key === "Enter" || e.key === "Escape")) {
+      // 这次键归输入法：不保存、不关弹窗，也不传给底下的拾取器或停止生成监听。
+      e.stopImmediatePropagation(); return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (sessionRename) { closeSessionRename(); } else { closeSessionMenu(true); }
+    } else if (sessionRename && e.key === "Tab") {
+      const controls = Array.from(sessionRename.el.querySelectorAll("input, button")).filter((node) => !node.disabled);
+      const at = controls.indexOf(document.activeElement);
+      e.preventDefault(); controls[(at + (e.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+    } else if (sessionMenu && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault(); sessionMenu.el.querySelector("button").focus();
+    }
+  }, true);
+
   /**
    * 「加载更多」那颗按钮。which = "sessions" 是上半会话那块的，"spaces" 是下半工作区那块的；
    * 两块各记各的加载中状态（同时点也不会互相把按钮弄乱）。
@@ -11499,6 +11661,7 @@
     if (!msg || typeof msg.type !== "string") { return; }
     const type = msg.type;
 
+    if (type === "sessionRenamed" || type === "sessionTitleChanged") { applySessionRenamed(msg); return; }
     if (type === "fetchChatResult") { applyFetchChatResult(msg); return; }
     if (type === "chatReferences") {
       chatReferences = Array.isArray(msg.items) ? msg.items : [];

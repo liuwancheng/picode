@@ -223,6 +223,8 @@ export class SessionRuntime {
     /** 正在加载会话 / 分叉（pi 冷启动 + 切换会话期间为 true，供宿主展示加载态）。 */
     public loading = false;
     public currentSessionPath: string | undefined;
+    /** 正在打开的目标文件：加载期间也算活动路径，历史改名不能从外面追写它。 */
+    public loadingSessionPath: string | undefined;
     /** 当前界面是否已有用户或助手消息；用于历史会话打开时复用空会话。 */
     private hasConversation = false;
     /** pi 上报的会话标题；来源是 session_info_changed 事件与 get_state 响应里的 sessionName。 */
@@ -557,6 +559,26 @@ export class SessionRuntime {
         this.host.broadcastSessionList();
     }
 
+    /** 只改元数据：原生 RPC 即使生成中也能执行，不发送消息、不停止或重启进程。 */
+    public async renameSession(name: string): Promise<boolean>;
+    public async renameSession(file: string, name: string): Promise<boolean>;
+    public async renameSession(fileOrName: string, name?: string): Promise<boolean> {
+        const legacy = name === undefined;
+        const file = legacy ? this.currentSessionPath : fileOrName;
+        const next = legacy ? fileOrName.trim().slice(0, RENAME_MAX_CHARS) : name!.trim();
+        if (!next || !this.client?.isRunning() || !this.piReady || this.loading || this.loadingSessionPath || this.currentSessionPath !== file) {
+            if (legacy) { return false; }
+            throw new Error("会话尚未就绪或已经切换，请稍后重试");
+        }
+        const response = await this.request({ type: "set_session_name", name: next });
+        if (!response?.success) {
+            if (legacy) { return false; }
+            throw new Error(response?.error || "改名未收到 pi 确认，请刷新后重试");
+        }
+        if (this.currentSessionPath === file) { this.setSessionTitle(next); }
+        return true;
+    }
+
     /** 会话被换掉：旧标题作废。 */
     private noteSessionReplaced(): void {
         this.piSessionTitle = "";
@@ -688,21 +710,6 @@ export class SessionRuntime {
     private async refreshSessionTitle(): Promise<void> {
         const resp = await this.request<RpcSessionState>({ type: "get_state" });
         this.captureSessionName(resp?.data);
-    }
-
-    /**
-     * 给这个会话改名字（顶条那一格、「项目与会话」里那一行双击名字）。
-     *
-     * 名字交给 pi 写进会话文件：顶条 / 列表 / 历史会话随后都靠 pi 发来的 session_info_changed
-     * 跟着换（见上面 setSessionTitle），这里不碰本地那份标题——名字只有一个准头：pi。
-     * 顺带的好处是 pi 那边的自动起标题从此不再动这个名字（那边认得出来这不是它起的）。
-     * 返回有没有真发出去：名字空着、会话进程还没就绪，都算没改。
-     */
-    public async renameSession(name: string): Promise<boolean> {
-        const next = typeof name === "string" ? name.trim().slice(0, RENAME_MAX_CHARS) : "";
-        if (!next || !this.piReady) { return false; }
-        const resp = await this.request({ type: "set_session_name", name: next });
-        return !!resp?.success;
     }
 
     public isRunning(): boolean {
@@ -1345,6 +1352,7 @@ export class SessionRuntime {
 
     // ---- 会话加载 ----
     public async loadSession(file: string): Promise<void> {
+        this.loadingSessionPath = file;
         if (!this.client || !this.client.isRunning()) {
             this.startClient();
         }
@@ -1357,6 +1365,7 @@ export class SessionRuntime {
         // 等待 pi 真正就绪（冷启动需数秒），避免命令挤在超时上
         const ready = await this.waitReady();
         if (!ready) {
+            this.loadingSessionPath = undefined;
             this.loading = false;
             this.host.broadcastSessionList();
             this.post({
@@ -1368,6 +1377,7 @@ export class SessionRuntime {
 
         const switchResp = await this.request({ type: "switch_session", sessionPath: file });
         if (!switchResp || switchResp.success === false) {
+            this.loadingSessionPath = undefined;
             this.loading = false;
             this.host.broadcastSessionList();
             this.post({
@@ -1390,6 +1400,7 @@ export class SessionRuntime {
         this.currentSessionPath = file;
         // 已有会话的标题不会走 session_info_changed，得主动问一次
         void this.refreshSessionTitle();
+        this.loadingSessionPath = undefined;
         this.loading = false;
         this.host.broadcastSessionList();
         this.refreshStats();

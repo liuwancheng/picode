@@ -171,7 +171,8 @@ if (allowedTools) {
 /** 这个假会话的 .jsonl。真 pi 每记一条就往会话文件里追加，插件有些路会去读它
  *  （# 引用、派子会话时把父会话的文件交给子会话）；这里照写一份，那些路才验得到。
  *  每个进程一个名字（真 pi 里也是一个会话一个文件），会话一多也不会互相盖掉。 */
-const sessionFile = path.join(process.cwd(), "fake-session-" + process.pid + ".jsonl");
+let sessionFile = path.join(process.cwd(), "fake-session-" + process.pid + ".jsonl");
+appendSession({ type: "session", version: 3, id: "fake-session", cwd: process.cwd(), timestamp: new Date().toISOString() });
 function appendSession(record) {
     try { fs.appendFileSync(sessionFile, JSON.stringify(record) + "\n", "utf8"); } catch { /* 写不进去就算了 */ }
 }
@@ -436,6 +437,7 @@ async function runScript(userText) {
             if (stillOurs) {
                 scriptState.sessionName = title;
                 scriptState.namedByScript = true;
+                appendSession({ type: "session_info", id: nextId("info"), parentId: null, timestamp: now(), name: title });
                 emit({ type: "session_info_changed", name: title });
             }
         }
@@ -699,13 +701,18 @@ async function handle(cmd) {
             });
             return;
         case "set_session_name": {
-            // 手动改名字：跟真 pi 一样，改名后发一条 session_info_changed（界面靠它换名字）
-            const name = String(cmd.name || "").trim();
-            if (!name) { write({ id, type: "response", command: cmd.type, success: false, error: "Session name cannot be empty" }); return; }
+            const name = typeof cmd.name === "string" ? cmd.name.trim() : "";
+            if (!name) {
+                write({ id, type: "response", command: cmd.type, success: false, error: "Session name cannot be empty" });
+                return;
+            }
             scriptState.sessionName = name;
             scriptState.namedByScript = false;
-            respond(id, cmd.type);
+            scriptState.titleSent = true;
+            appendSession({ type: "session_info", id: nextId("info"), parentId: null, timestamp: new Date().toISOString(), name });
+            appendSession({ type: "custom", id: nextId("manual"), parentId: null, timestamp: new Date().toISOString(), customType: "pichat.title.manual", data: { name } });
             write({ type: "session_info_changed", name });
+            respond(id, cmd.type);
             return;
         }
         case "get_available_models":
@@ -721,6 +728,8 @@ async function handle(cmd) {
                 scriptState.titleSent = false;
                 scriptState.sessionName = "假会话（fakePi）";
                 scriptState.namedByScript = false;
+                sessionFile = path.join(process.cwd(), "fake-session-" + process.pid + "-" + nextId("new") + ".jsonl");
+                appendSession({ type: "session", version: 3, id: "fake-session", cwd: process.cwd(), timestamp: now() });
             }
             respond(id, cmd.type, {});
             return;
@@ -752,10 +761,23 @@ async function handle(cmd) {
             respond(id, "get_last_assistant_text", { text });
             return;
         }
-        case "switch_session":
+        case "switch_session": {
             messages.length = 0;
+            sessionFile = cmd.sessionPath;
+            scriptState.sessionName = "";
+            scriptState.namedByScript = false;
+            scriptState.titleSent = false;
+            try {
+                const entries = fs.readFileSync(sessionFile, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+                for (const entry of entries) {
+                    if (entry.type === "message") { messages.push(entry.message); }
+                    if (entry.type === "session_info") { scriptState.sessionName = entry.name; }
+                }
+                scriptState.titleSent = entries.some((entry) => entry.type === "custom" && entry.customType === "pichat.title.manual");
+            } catch { /* 与其它假协议一样，坏文件不演历史 */ }
             respond(id, "switch_session", { cancelled: false });
             return;
+        }
         case "abort":
         case "abort_bash":
         case "clear_queue":

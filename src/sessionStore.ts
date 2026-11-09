@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { randomUUID } from "crypto";
 import { isKnownChildSession } from "./childSessions";
 import { dirKey } from "./pathRules";
 import { TABA_CLOSING_MARK } from "./tabaTask";
@@ -58,6 +59,67 @@ export interface ProjectEntry {
 
 /** 标题上限：超长由前端按宽度截断，这里只防极端长文本。 */
 const TITLE_MAX_CHARS = 200;
+
+/** 手动标题与列表使用同一个上限；换行、连续空白折成一个空格。 */
+export function normalizeSessionName(value: unknown): string {
+    if (typeof value !== "string") { throw new Error("会话名称必须是文字"); }
+    const name = value.replace(/\s+/g, " ").trim();
+    if (!name) { throw new Error("会话名称不能为空"); }
+    if (name.length > TITLE_MAX_CHARS) { throw new Error(`会话名称不能超过 ${TITLE_MAX_CHARS} 个字符`); }
+    if (/[\x00-\x1f\x7f]/.test(name)) { throw new Error("会话名称不能包含控制字符"); }
+    return name;
+}
+
+/**
+ * 未打开历史只追加元数据，不启动 pi。调用方先确认它属于 cwd 的已知会话；
+ * 提交前再确认没被打开、盘上没变，避免与新打开的 pi 或同时改名相互踩写。
+ */
+export async function renameHistorySession(file: string, name: string, beforeAppend: () => void): Promise<void> {
+    const original = await fs.promises.lstat(file);
+    if (!original.isFile() || original.isSymbolicLink()) { throw new Error("不是普通会话文件"); }
+    let parentId: string | null = null;
+    let carry = "";
+    const readEntry = (line: string) => {
+        if (!line.trim()) { return; }
+        const entry = JSON.parse(line);
+        if (entry.type !== "session" && typeof entry.id === "string") { parentId = entry.id; }
+    };
+    // 严格按 LF 分记录（readline 会把 JSON 字符串里的 U+2028/U+2029 也拆开）。
+    for await (const chunk of fs.createReadStream(file, { encoding: "utf8" })) {
+        carry += chunk;
+        let nl: number;
+        while ((nl = carry.indexOf("\n")) >= 0) {
+            readEntry(carry.slice(0, nl));
+            carry = carry.slice(nl + 1);
+        }
+    }
+    readEntry(carry);
+    beforeAppend();
+    // 最后这段同步做完：两个页面同时改同一个历史会话时，后提交的应失败而非接错父节点。
+    const fd = fs.openSync(file, "r+");
+    try {
+        const current = fs.fstatSync(fd);
+        if (current.size !== original.size || current.mtimeMs !== original.mtimeMs
+            || current.ino !== original.ino || current.dev !== original.dev) {
+            throw new Error("会话文件已变化，请重试");
+        }
+        const timestamp = new Date().toISOString();
+        const id = randomUUID();
+        const info = { type: "session_info", id, parentId, timestamp, name };
+        const manual = {
+            type: "custom", id: randomUUID(), parentId: id, timestamp,
+            customType: "pichat.title.manual", data: { name },
+        };
+        const tail = Buffer.alloc(1);
+        if (current.size) { fs.readSync(fd, tail, 0, 1, current.size - 1); }
+        const text = (current.size && tail[0] !== 0x0a ? "\n" : "")
+            + JSON.stringify(info) + "\n" + JSON.stringify(manual) + "\n";
+        fs.writeSync(fd, text, current.size, "utf8");
+        scanCache.delete(file);
+    } finally {
+        fs.closeSync(fd);
+    }
+}
 
 /** pi 配置目录，遵循 PI_CODING_AGENT_DIR 环境变量。 */
 function agentDir(): string {

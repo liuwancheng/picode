@@ -301,6 +301,14 @@ node dev/diffCheck.js
 # （同名的还有别处也只回它，这一下不扫整个仓库）；没碰过的才列文件清单；目录外那份不认：
 node dev/linkCandidates.js
 
+# 验会话行「… → 重命名」（历史会话不切换、不启动进程；活动会话顶条同步；
+# 取消 / 空白名 / 输入法 / 回车保存 / 保存失败 / 分页 / 刷新保留 / 窄窗菜单与弹窗，假数据、不调模型）：
+npm run web:shot -- --fake-pi --width 1200 --height 760 --script dev/sessionRename.js
+# 不开浏览器验改名后端；加 --real-pi 验原生 RPC 与标题桥，仍不向模型发消息：
+node dev/renameSessionBackend.js --real-pi
+# 原有双击改名入口的浏览器回归（与「…」菜单同时保留）：
+npm run web:shot -- --fake-pi --width 1200 --height 760 --script dev/renameSession.js
+
 # 验「项目与会话」面板（顶条最右边那颗 <<<）：
 # 正在对话一段、工作区那块的展开 / 收起、组里的「加载更多」、行尾那颗加号新建会话、
 # 标题右边那颗加号（挑文件夹）、子会话不显示，一次过一遍：
