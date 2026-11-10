@@ -21,6 +21,8 @@
  *   -resource:p0,编号 0 那个文件 …  ← 顺序与 payload.txt 一致
  *   -resource:fingerprint.txt,fingerprint
  *   -win32icon:PiChat.ico           ← exe 的文件图标
+ * 名字按 exe 的名字来（dist\PiChat.exe → PiChat）。换了名字的那一份（`npm run exe -- --name PiHarness`）
+ * 自己占一份数据目录与设置目录，跟默认那份不抢后端，两份可以并存。
  */
 using System;
 using System.Diagnostics;
@@ -33,7 +35,10 @@ using System.Windows.Forms;
 
 static class Launcher
 {
-    private const string AppName = "PiChat";
+    /** 这一份叫什么：按 exe 的名字认（PiChat.exe → PiChat），解码目录与日志都跟着它分。 */
+    private static readonly string AppName = Path.GetFileNameWithoutExtension(Application.ExecutablePath);
+    /** 默认那一份：设置目录用 ~/.pi/pichat，跟终端里敲的 pichat、插件那侧共用同一份。 */
+    private static readonly bool IsDefaultName = string.Equals(AppName, "PiChat", StringComparison.OrdinalIgnoreCase);
     /** 后端要的 Node 版本。 */
     private const int MinNodeMajor = 20;
 
@@ -57,6 +62,12 @@ static class Launcher
         string appDir = Path.Combine(dataDir, "app-" + (fingerprint.Length > 0 ? fingerprint : "dev"));
         Unpack(appDir);
         RemoveOldAppDirs(dataDir, appDir);
+
+        // 换了名字的那一份用自己的一份设置目录：连“已经有后端在跑吗”这一步也得看自己那一份，
+        // 不然它会看见默认那份的后端、只把人家的页面打开就退了。设在这里，下面读地址文件
+        // 和起子进程（继承环境变量）都跟着它走。
+        string home = HomeDir(dataDir);
+        if (home != null) { Environment.SetEnvironmentVariable("PICHAT_HOME", home); }
 
         // 已经有一个后端在跑（终端里起的、或者另一个 exe）：只把那个页面打开，不起第二个
         string running = RunningServerUrl();
@@ -112,6 +123,33 @@ static class Launcher
             if (other != null) { OpenUrl(other); }
         }
         return code;
+    }
+
+    /**
+     * 这一份的设置目录（后端的 PICHAT_HOME）。
+     *
+     * 默认那份（PiChat.exe）不设，跟终端里敲的 pichat、插件那侧共用 ~/.pi/pichat；
+     * 换了名字的那一份用自己的一份 <数据目录>\home —— 不然两个 exe 盯着同一个地址文件，
+     * 后起来的那个只会把前一个的页面打开，两份并存不了。
+     * 第一次起来时把默认那份的设置（模型、端口这些）抄一份过来，省得重新配。
+     */
+    private static string HomeDir(string dataDir)
+    {
+        if (IsDefaultName) { return null; }
+        string home = Path.Combine(dataDir, "home");
+        string seeded = Path.Combine(home, "config.json");
+        if (!File.Exists(seeded))
+        {
+            try
+            {
+                Directory.CreateDirectory(home);
+                string from = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pi", "pichat", "config.json");
+                if (File.Exists(from)) { File.Copy(from, seeded); }
+            }
+            catch { /* 抄不过来就按默认设置起 */ }
+        }
+        return home;
     }
 
     /** 起 Node 跑后端，把它的输出写进日志文件（GUI 没有控制台），等它退出。 */
