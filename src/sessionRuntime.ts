@@ -911,6 +911,10 @@ export class SessionRuntime {
             this.statusModelId = model.id;
             this.statusProvider = model.provider;
             this.post({ type: "modelChanged", modelId: model.id, provider: model.provider });
+            // 阶段要看“配了模型没有”（见 phase()）：模型是这一刻才知道的，不重算就永远
+            // 停在 nomodel —— 界面上那颗胶囊写着「选模型」，可模型早就到了（首个会话冷启动、
+            // 没有备用进程顶上时必然这样）。
+            this.postPhase();
         }
         const thinkingLevel = resp?.data?.thinkingLevel;
         if (thinkingLevel) {
