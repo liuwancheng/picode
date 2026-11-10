@@ -2151,6 +2151,7 @@
     }
     // 这一遍没再来「加载更早」那条：说明这次发的是全部，按钮收掉（跟清空重画时一个结果）
     if (!rec.historyWindow) { setHistoryWindow(st, false, 0); }
+    syncMsgTimes(pane);
     st.suppressScroll = false;
     st.fromHistory = false;
     syncEndHint(st);
@@ -2610,9 +2611,9 @@
     return body;
   }
 
-  /** 这条消息的时刻：鼠标停在正文上才露（跟原来的复制按钮一个位置，见 chat.css 的 .msg-time）。
+  /** 回答后的时间行：常显、居中，不再悬停才露（见 chat.css 的 .msg-time）。
    *  at 是那条消息的开始时刻（毫秒）；拿不到（老后端 / 历史里没带）就用现在。
-   *  字写进 data-time、由 CSS 的 ::after 画：它不算正文的文字（选中复制、Ctrl+A、读屏都不带上它）。 */
+   *  字写进 data-time、由 CSS 的 ::after 画：不混入正文复制内容。 */
   function attachMsgTime(div, at) {
     const ms = typeof at === "number" && at > 0 ? at : Date.now();
     const el = document.createElement("span");
@@ -2631,12 +2632,26 @@
     el.title = formatFullTime(ms);
   }
 
-  /** 时刻写成短的：今天只写时分（15:04），别的日子前面补日期（10-17 15:04），跨年的写全年。 */
+  /** 一条用户提问起算一轮：只露最后一段回答的时间，正文与工具之间不重复插分隔。
+   *  从当前 DOM 重算，历史对账 / 补页也共用；不另存一套轮次状态。 */
+  function syncMsgTimes(pane) {
+    let last = null;
+    for (const message of pane.querySelectorAll(":scope > .msg.user, :scope > .msg.assistant")) {
+      if (message.classList.contains("user")) { last = null; continue; }
+      const time = message.querySelector(":scope > .msg-time");
+      if (!time) { continue; }
+      if (last) { last.hidden = true; }
+      time.hidden = false;
+      last = time;
+    }
+  }
+
+  /** 时间行：今天带「今天」（今天 15:04），别的日子补日期（10-17 15:04），跨年的写全年。 */
   function formatMsgTime(ms) {
     const d = new Date(ms);
     const hm = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
     const now = new Date();
-    if (d.toDateString() === now.toDateString()) { return hm; }
+    if (d.toDateString() === now.toDateString()) { return "今天 " + hm; }
     if (d.getFullYear() === now.getFullYear()) { return pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + hm; }
     return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + hm;
   }
@@ -2725,6 +2740,7 @@
       // 时刻跟着这次重放的来（以前停在上一遍的旧值上）
       updateMsgTime(known, at);
       placeUnit(st, known);
+      if (!st.replayNow) { syncMsgTimes(st.paneEl); }
       scrollToBottom(st);
       return body2;
     }
@@ -2736,10 +2752,11 @@
     body.innerHTML = renderMarkdown(text);
     fixMdImages(body, st.id);
     decorateMermaid(body);
-    attachMsgTime(div, at);
     div.appendChild(body);
+    attachMsgTime(div, at);
     if (key) { div.dataset.mid = key; div.dataset.midKind = "assistant"; st.byId.set(key, div); }
     placeUnit(st, div);
+    if (!st.replayNow) { syncMsgTimes(st.paneEl); }
     scrollToBottom(st);
     return body;
   }
@@ -12832,6 +12849,7 @@
     const prevAnchorStyle = pane.style.overflowAnchor;
     pane.style.overflowAnchor = "none";
     while (stage.firstChild) { pane.insertBefore(stage.firstChild, at); }
+    syncMsgTimes(pane);
     const grew = pane.scrollHeight - beforeHeight;
     let grewLeft = grew;
     const putBack = () => {
@@ -13084,6 +13102,7 @@
     const cut = cutIndexForTurns(events, TAIL_TURNS);
     const older = events.slice(0, cut);
     for (let i = cut; i < events.length; i += 1) { applyPanelMessage(events[i]); }
+    syncMsgTimes(st.paneEl);
     if (older.length) {
       st.older = older;
       mountOlderHint(st);
@@ -13156,6 +13175,7 @@
         pane.insertBefore(node, ruler);
         node = next;
       }
+      syncMsgTimes(pane);
       // 占位跟着缩（高度按这会儿量出来的平均高度重估：一开始估得不准，补一轮就准一轮）
       if (st.older.length) { mountOlderHint(st); } else { dropOlderHint(st); }
       if (inside || !ruler || ruler.parentNode !== pane) {

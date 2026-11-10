@@ -333,11 +333,10 @@
   /* 第一条前面没有上一轮；连续补充提问也不用再隔出一整轮的空当。 */
   .msg.user:first-child, .msg.user + .msg.user { margin-top: 12px; }
   .assistant { position: relative; background: none; padding: 10px 14px; }
-  /* 鼠标停在正文上，右下角写这条消息的时刻（原先那个复制按钮的位置，现在已经撤掉）。
-     不占布局位置、不挡鼠标：只是浮现一行小字。 */
-  .msg-time { position: absolute; bottom: 2px; right: 4px; padding: 3px 4px; border-radius: 4px; color: var(--vscode-descriptionForeground, #999); font-size: 12px; line-height: 1; opacity: 0; pointer-events: none; font-variant-numeric: tabular-nums; transition: opacity 120ms ease; }
-  .msg.assistant:hover .msg-time { opacity: 1; }
-  /* 字挂在 data-time 上、由这个伪元素画出来：它就不算正文的文字（选中复制、Ctrl+A、读屏都不带上它）。 */
+  /* 时间常显、居中独占一行：不覆盖正文，前后回答的交界一眼可见。 */
+  .msg-time { display: block; margin: 16px 0 4px; color: var(--vscode-descriptionForeground, #999); font-size: 12px; line-height: 20px; text-align: center; user-select: none; font-variant-numeric: tabular-nums; }
+  .msg-time[hidden] { display: none; }
+  /* 字挂在 data-time 上、由伪元素画出来，配合 user-select 不混入正文复制内容。 */
   .msg-time::after { content: attr(data-time); }
   .system { font-style: italic; opacity: 0.6; font-size: 0.85em; white-space: pre-wrap; text-align: center; border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 0; margin: 12px 0; }
   .error { color: var(--vscode-errorForeground); }
