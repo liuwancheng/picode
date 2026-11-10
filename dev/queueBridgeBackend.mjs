@@ -1,4 +1,4 @@
-/** 真 pi SDK + 后端路由回归；人工填 native 队列，不启动任何模型。
+/** 真 pi SDK + 后端路由回归；busy prompt 真入队与人工 native 队列均不启动模型。
  * npm run compile && node dev/queueBridgeBackend.mjs [pi-coding-agent 包的绝对目录]
  */
 import assert from 'node:assert/strict';
@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 const require = createRequire(import.meta.url);
-const { QUEUE_BRIDGE_SOURCE, QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, decodeQueueResult } = require('../out/server/queueBridgeSource.js');
+const { QUEUE_BRIDGE_SOURCE, QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, QUEUE_PROMPT_PREFIX, encodeQueuePrompt, decodeQueueResult } = require('../out/server/queueBridgeSource.js');
 const { SessionRuntime, commandMenuItems } = require('../out/server/sessionRuntime.js');
 const { ChatHost } = require('../out/server/chatHost.js');
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pichat-queue-'));
@@ -47,8 +47,11 @@ async function makeSession(id) {
     session._expandSkillCommand = () => { throw new Error('禁止重新展开技能'); };
     const rt = new SessionRuntime(id, { adjective: '测试', noun: id }, host);
     host.panels.set(id, rt);
+    const pendingSends = [];
+    const queueEvents = [];
     const client = {
         isRunning: () => true,
+        send(cmd) { pendingSends.push(this.request(cmd)); },
         stop() {},
         request: async cmd => {
             commands.push(cmd.type);
@@ -57,11 +60,15 @@ async function makeSession(id) {
                     .map(command => ({ name: command.invocationName, source: 'extension' })) } };
             }
             if (cmd.type === 'prompt') {
-                assert(cmd.message.startsWith('/' + QUEUE_REMOVE_COMMAND + ' '));
-                assert(!('images' in cmd) && !('streamingBehavior' in cmd));
+                if (cmd.message.startsWith('/' + QUEUE_REMOVE_COMMAND + ' ')) {
+                    assert(!('images' in cmd) && !('streamingBehavior' in cmd));
+                } else {
+                    assert(['steer', 'followUp'].includes(cmd.streamingBehavior));
+                }
                 try {
                     let disposition;
-                    await session.prompt(cmd.message, { source: 'rpc', preflightResult: result => { disposition = result; } });
+                    await session.prompt(cmd.message, { source: 'rpc', streamingBehavior: cmd.streamingBehavior,
+                        images: cmd.images, preflightResult: result => { disposition = result; } });
                     return { success: true, data: { disposition } };
                 } catch (error) { return { success: false, error: error.message }; }
             }
@@ -71,13 +78,16 @@ async function makeSession(id) {
     rt.client = client;
     rt.piReady = true;
     rt.streaming = true;
-    session.subscribe(event => rt.onPiEvent(event));
+    session.subscribe(event => {
+        if (event.type === 'queue_update') { queueEvents.push(event); }
+        rt.onPiEvent(event);
+    });
     await session.bindExtensions({ mode: 'rpc', uiContext: {
         notify: message => rt.onPiUiRequest({ method: 'notify', message }),
     }, onError: error => rt.onPiEvent({ type: 'extension_error', ...error }) });
     // busy 下同样先处理扩展命令；不启动 agent loop。
     session._isAgentRunActive = true;
-    return { session, rt, client };
+    return { session, rt, client, pendingSends, queueEvents };
 }
 function user(text, images = []) {
     return { role: 'user', content: [{ type: 'text', text }, ...images.map(image => ({ type: 'image', ...image }))], timestamp: Date.now() };
@@ -111,7 +121,7 @@ async function action(item, fields = {}, page = 'first') {
 try {
     const a = await makeSession('a');
     const b = await makeSession('b');
-    // 真 _queueSteer 在推事件之后才写 native queue，结构能力检查不能误关操作。
+    // SDK 原 _queueSteer 先发事件再写 native queue；桥在同一调用栈内延后事件，不误关操作。
     const nativeImage = { type: 'image', data: 'native', mimeType: 'image/png' };
     await b.session._queueSteer('真入队', [nativeImage]);
     assert(b.rt.queueEditable);
@@ -130,6 +140,134 @@ try {
     assert.equal((await action(b, { kind: 'followUp', text: '真跟进', act: 'edit', replacement: '修改跟进' })).success, true);
     assert.equal((await action(b, { kind: 'followUp', text: '修改跟进' })).success, true);
     assert.equal((await action(b, { text: '真修改' })).success, true);
+    // 自动来源传输：经 runtime handleSend、真 prompt 异步输入处理、真双队列入队，始终不启动模型。
+    const automaticCustom = { role: 'custom', customType: 'source-test', content: '保持原位', display: false, timestamp: Date.now() };
+    for (const item of [a, b]) {
+        item.session._runInputHandlers = async (text, images) => {
+            await new Promise(resolve => setImmediate(resolve));
+            return { text: text.replace('待变换', '变换后'), images };
+        };
+        item.session._expandSkillCommand = text => text;
+    }
+    setQueue(a, [], [], [automaticCustom], [automaticCustom]);
+    const flush = async item => {
+        const responses = await Promise.all(item.pendingSends.splice(0));
+        assert(responses.every(response => response.success && response.data.disposition === 'queued'));
+    };
+    const sourceText = '【子会话结果】后台命令 #1 跑完了\n同文输入';
+    const autoImage = { data: 'automatic-image', mimeType: 'image/png' };
+    a.rt.handleSend(sourceText, undefined, { steer: true });
+    a.rt.handleSend(sourceText); // 同文用户输入绝不能继承自动来源。
+    a.rt.handleSend('待变换', [autoImage], { followUp: true });
+    a.rt.streaming = false;
+    a.rt.handleSend('待变换'); // 相同的异步变换结果，但这条是用户输入。
+    a.rt.streaming = true;
+    b.rt.handleSend(sourceText); // 不同会话的同文用户输入。
+    await Promise.all([flush(a), flush(b)]);
+    assert.deepEqual(a.rt.queuedSteering, [sourceText, sourceText]);
+    assert.deepEqual(a.rt.queuedFollowUp, ['变换后', '变换后']);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [0]);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenFollowUp, [0]);
+    assert.deepEqual(b.rt.queueSnapshot().hiddenSteering, []);
+    const autoSteering = a.session.agent.steeringQueue.messages[1];
+    const humanSteering = a.session.agent.steeringQueue.messages[2];
+    const autoFollow = a.session.agent.followUpQueue.messages[1];
+    assert.equal(autoSteering.content[0].text, sourceText);
+    assert.equal(autoFollow.content[0].text, '变换后');
+    assert.deepEqual(autoFollow.content[1], { type: 'image', ...autoImage });
+    assert(a.queueEvents.some(event => event.steering.length === 1 && event.queueHiddenSteering[0] === 0));
+    const beforeHiddenActions = commands.length;
+    for (const kind of ['steering', 'followUp']) {
+        for (const act of ['edit', 'cancel']) {
+            const hiddenResult = await action(a, { kind, act, text: kind === 'steering' ? sourceText : '变换后', replacement: '不能改' });
+            assert.equal(hiddenResult.success, false);
+            assert.match(hiddenResult.error, /自动/);
+        }
+    }
+    assert.equal(commands.length, beforeHiddenActions); // 后端拒绝，无内部命令发出。
+    // 绕过后端，直接请求扩展命令也不能改隐藏对象。
+    const sourceHandler = a.session.extensionRunner.getCommand(QUEUE_REMOVE_COMMAND).handler;
+    const sourceCtx = a.session.extensionRunner.createCommandContext();
+    const sourceNotify = sourceCtx.ui.notify;
+    let hiddenDirect;
+    sourceCtx.ui.notify = message => { hiddenDirect = decodeQueueResult(message); };
+    for (const act of ['edit', 'cancel']) {
+        sourceHandler(Buffer.from(JSON.stringify({ requestId: 'hidden-direct', act, kind: 'steering', index: 0,
+            text: sourceText, revision: a.rt.queueRevision, nativeSessionId: a.session.sessionId, replacement: '不能改' })).toString('base64'), sourceCtx);
+        assert.equal(hiddenDirect.success, false);
+        assert.match(hiddenDirect.error, /自动/);
+    }
+    sourceCtx.ui.notify = sourceNotify;
+    // 原摘要 index=1 的用户消息仍可修改，隐藏的 index=0 及其对象不变。
+    assert.equal((await action(a, { index: 1, text: sourceText, act: 'edit', replacement: '用户修改' })).success, true);
+    assert.equal(humanSteering.content[0].text, '用户修改');
+    assert.equal(autoSteering.content[0].text, sourceText);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [0]);
+    // 新用户消息插在自动结果之前，取消可见原索引后隐藏索引同步移位。
+    setQueue(a, ['头条', sourceText, '用户修改'], ['变换后', '变换后'],
+        [automaticCustom, user('头条'), autoSteering, humanSteering], [automaticCustom, autoFollow, a.session.agent.followUpQueue.messages[2]]);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [1]);
+    assert.equal((await action(a, { text: '头条' })).success, true);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [0]);
+    // 两条 native 同文跟进都被一次 drain 取走，摘要在 message_start 之前逐条缩短。
+    a.session.agent.followUpQueue.mode = 'all';
+    const drained = a.session.agent.followUpQueue.drain();
+    assert.equal(drained[1], autoFollow);
+    const refreshStatsSoon = a.rt.refreshStatsSoon;
+    a.rt.refreshStatsSoon = () => {}; // message_start 的统计 RPC 不属于队列测试。
+    await a.session._handleAgentEvent({ type: 'message_start', message: drained[1] });
+    assert.deepEqual(a.rt.queuedFollowUp, ['变换后']);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenFollowUp, []);
+    await a.session._handleAgentEvent({ type: 'message_start', message: drained[2] });
+    // native 批量取走后，未投递的第二条自动结果仍隐藏。
+    setQueue(a, [], [], [], []);
+    a.rt.streaming = false;
+    a.rt.handleSend('先投递的用户');
+    a.rt.handleSend('稍后投递的自动结果', undefined, { followUp: true });
+    await flush(a);
+    const nextDrained = a.session.agent.followUpQueue.drain();
+    await a.session._handleAgentEvent({ type: 'message_start', message: nextDrained[0] });
+    assert.deepEqual(a.rt.queueSnapshot().hiddenFollowUp, [0]);
+    await a.session._handleAgentEvent({ type: 'message_start', message: nextDrained[1] });
+    assert.deepEqual(a.rt.queueSnapshot().hiddenFollowUp, []);
+    a.rt.refreshStatsSoon = refreshStatsSoon;
+    a.rt.streaming = true;
+    // 来源标记只随对象生存：旧结果已投递，同文的新用户输入仍显示。
+    a.rt.handleSend('稍后投递的自动结果');
+    // 用户原样输入协议标记也会被转义，不能变成自动结果。
+    const literalEnvelope = encodeQueuePrompt('用户输入的完整协议文字', true);
+    a.rt.handleSend(literalEnvelope);
+    a.rt.handleSend(QUEUE_PROMPT_PREFIX + 'not-base64');
+    await flush(a);
+    assert.deepEqual(a.rt.queuedSteering, ['稍后投递的自动结果', literalEnvelope, QUEUE_PROMPT_PREFIX + 'not-base64']);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, []);
+    // agent_settled 期间 SDK 延迟的 prompt 仍保留自动来源。
+    a.session._isEmittingAgentSettled = true;
+    await a.session.prompt(encodeQueuePrompt('延迟的自动结果', true), { source: 'rpc', streamingBehavior: 'steer' });
+    a.session._isEmittingAgentSettled = false;
+    for (const deferred of a.session._deferredSettledActions.splice(0)) { await deferred(); }
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [3]);
+    assert.equal(a.rt.queuedSteering[3], '延迟的自动结果');
+    // 修改能力关闭不等于来源失效；冻结 native 队列仍应隐藏自动结果。
+    Object.freeze(a.session.agent.steeringQueue.messages);
+    a.session._emitQueueUpdate();
+    assert.equal(a.rt.queueEditable, false);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, [3]);
+    // 自动空闲输入在 input hook 中被处理，不启动模型；hook 看到的始终是解码后的原文。
+    b.session._isAgentRunActive = false;
+    let idleInput;
+    b.session._runInputHandlers = async text => { idleInput = text; return undefined; };
+    await b.session.prompt(encodeQueuePrompt('空闲自动输入原文', true), { source: 'rpc', streamingBehavior: 'followUp' });
+    assert.equal(idleInput, '空闲自动输入原文');
+    b.session._isAgentRunActive = true;
+    for (const item of [a, b]) {
+        item.session._runInputHandlers = () => { throw new Error('禁止重新输入处理'); };
+        item.session._expandSkillCommand = () => { throw new Error('禁止重新展开技能'); };
+    }
+    setQueue(a, [], [], [], []);
+    a.rt.noteSessionReplaced();
+    assert.deepEqual(a.rt.queueSnapshot().hiddenSteering, []);
+    assert.deepEqual(a.rt.queueSnapshot().hiddenFollowUp, []);
     // 以下操作不能调用任何入队方法，也不能清队列、输入处理、技能展开或模型。
     for (const item of [a, b]) {
         item.session._queueSteer = item.session._queueFollowUp = item.session.agent.steer = item.session.agent.followUp =
@@ -363,7 +501,7 @@ try {
     assert(!first.concat(second).some(msg => msg.type === 'system' && String(msg.text).startsWith(QUEUE_RESULT_PREFIX)));
     assert(commands.every(command => ['get_commands', 'prompt'].includes(command)));
     assert(sessions.every(session => session.messages.length === 0));
-    console.log('通过：真 pi SDK 双队列原位修改、重复原文指定 index、大图/custom/对象/顺序/时间戳保留、followUp 修改、cancel 删单条、陈旧/投递竞态拒绝、冻结/不可写无半更新、未知结构拒绝、跨会话与双页面定向结果、无模型/clear/重排/重新输入、reload 防模型回落。');
+    console.log('通过：自动结果显式传输/原文解码、异步并发/跨会话/同文用户来源隔离、隐藏原索引/双重拒绝/索引移位、批量投递及生命周期、真 pi SDK 双队列原位修改、重复原文指定 index、大图/custom/对象/顺序/时间戳保留、followUp 修改、cancel 删单条、陈旧/投递竞态拒绝、冻结/不可写无半更新、未知结构拒绝、跨会话与双页面定向结果、无模型/clear/重排/重新输入、reload 防模型回落。');
 } finally {
     for (const session of sessions) { session._isAgentRunActive = false; session.dispose(); }
     host.dispose();

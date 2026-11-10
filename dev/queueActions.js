@@ -10,15 +10,39 @@ module.exports = async (page) => {
     const long = '与 ARM 最终对照，并按 prepare→preaccept_check→publish_batch 实验接收，最后给出闭环原因，或下一步明确的文件修改点。';
     const rows = [background, long, background];
     const post = async (msgs) => { await page.eval(`for (const m of ${JSON.stringify(msgs)}) window.postMessage(m, '*'); return true;`); await page.sleep(150); };
-    const snapshot = (steering, followUp, revision, editable = true) => ({type:'queueUpdate',sessionId:sid,steering,followUp,revision,editable});
+    const snapshot = (steering, followUp, revision, editable = true, hiddenSteering = [], hiddenFollowUp = []) =>
+        ({type:'queueUpdate',sessionId:sid,steering,followUp,revision,editable,hiddenSteering,hiddenFollowUp});
     const change = value => page.eval(`const area=document.querySelector('#queueBar .qb-edit-input'); area.value=${JSON.stringify(value)}; area.dispatchEvent(new Event('input', {bubbles:true})); return true;`);
-    await page.eval(`const api = window.acquireVsCodeApi(); window.__queueApi = api; window.__queueOrig = api.postMessage; window.__queueSent = []; api.postMessage = msg => { if (msg.type === 'queueAction') { window.__queueSent.push(msg); } else window.__queueOrig(msg); }; return true;`);
+    await page.eval(`const api = window.acquireVsCodeApi(); window.__queueApi = api; window.__queueOrig = api.postMessage; window.__queueSent = []; api.postMessage = msg => { if (msg.type === 'queueAction' || msg.type === 'abort') { window.__queueSent.push(msg); } else window.__queueOrig(msg); }; return true;`);
     try {
+        const child = '【子会话「只读探针」跑完了，用时 11 秒】';
+        await post([snapshot([background], [child], 7, true, [0], [0])]);
+        check(await page.eval(`return document.querySelector('#queueBar').classList.contains('hidden');`), '只有自动交回内容时排队消息整块隐藏');
+        await post([snapshot([background, '用户第一句', background, '用户第二句'], [child, '用户下一轮补充', child], 7, true, [0, 2], [0, 2])]);
+        check(await page.eval(`return JSON.stringify(Array.from(document.querySelectorAll('#queueBar .qb-block')).map(card => [card.dataset.kind, card.dataset.index])) === JSON.stringify([['steering','1'],['steering','3'],['followUp','1']]);`), '队列中间多条自动结果隐藏后，所有可见项仍保留原索引');
+        // 同文也能区分来源：下面的第二条是人输入的，不能靠正文前缀过滤。
+        await post([snapshot([background, background, long], [child, '用户补充：请只读检查'], 8, true, [0], [0])]);
+        check(await page.eval(`return document.querySelectorAll('#queueBar .qb-block').length === 3 && !document.querySelector('#queueBar .qb-block[data-index="0"]');`), '混合队列只显示用户输入，同文用户输入仍保留');
+        await post([snapshot([background, '请先核实 task 的模型和等级', long], [child, '用户补充：请只读检查'], 8, true, [0], [0])]);
+        await page.shot(`queue-user-only-${width}.png`);
+        await post([snapshot([background, background, long], [child, '用户补充：请只读检查'], 8, true, [0], [0])]);
+        await page.click('#queueBar .qb-block[data-kind="steering"][data-index="2"] .qb-cancel');
+        let hiddenRequest = await page.eval('return window.__queueSent.at(-1);');
+        check(hiddenRequest.index === 2 && hiddenRequest.text === long, '隐藏自动消息后取消仍用原始索引');
+        await post([snapshot([background, background], [child, '用户补充：请只读检查'], 9, true, [0], [0]), {...hiddenRequest,type:'queueActionResult',success:true}]);
+        await page.click('#queueBar .qb-block[data-kind="followUp"][data-index="1"] .qb-edit');
+        await change('用户修改后的补充');
+        await page.click('#queueBar .qb-save');
+        hiddenRequest = await page.eval('return window.__queueSent.at(-1);');
+        check(hiddenRequest.kind === 'followUp' && hiddenRequest.index === 1, '隐藏子会话结果后编辑仍用原始 followUp 索引');
+        await post([snapshot([background, background], [child, '用户修改后的补充'], 10, true, [0], [0]), {...hiddenRequest,type:'queueActionResult',success:true}]);
+        await page.eval('window.__queueSent = []; return true;');
+        // 后续含机器通知字样的文本全部按用户输入验，来源不由正文决定。
         await post([snapshot(rows, ['子会话完成结果'], 10)]);
         check(await page.eval(`return document.querySelectorAll('#queueBar .qb-action').length === 8;`), 'steering 与 followUp 每条都有两颗按钮');
         check(await page.eval(`return Array.from(document.querySelectorAll('#queueBar .qb-action')).every(b => { const r=b.getBoundingClientRect(); const svg=b.querySelector('svg').getBoundingClientRect(); return r.right <= innerWidth && r.width >= 28 && svg.width === 16 && !b.disabled; });`), '窄屏按钮不被挤走，图标不被内边距挤小');
         await page.click('#queueBar .qb-head');
-        check(await page.eval(`return document.querySelector('#queueBar .qb-body').textContent === ${JSON.stringify(background)};`), '摘要展开可看完整后台结果');
+        check(await page.eval(`return document.querySelector('#queueBar .qb-body').textContent === ${JSON.stringify(background)};`), '用户输入可展开全文，即使正文恰好写着后台结果');
         await page.shot(`queue-actions-${width}.png`);
 
         await page.click('#queueBar .qb-block[data-index="2"][data-kind="steering"] .qb-cancel');
@@ -81,6 +105,12 @@ module.exports = async (page) => {
         await page.click('#queueBar .qb-discard');
         await post([snapshot(['旧 pi 上的排队消息'], [], 0, false)]);
         check(await page.eval(`return Array.from(document.querySelectorAll('#queueBar .qb-action')).every(b => b.disabled);`), '不支持逐条操作时关闭按钮，绝不清空重排');
+        await post([snapshot([background, '用户还没投递的补充'], [child], 17, true, [0], [0]), {type:'streamStart',sessionId:sid}]);
+        await page.click('#input');
+        await page.press('Escape');
+        check(await page.eval(`return window.__queueSent.at(-1).type === 'abort';`), 'Esc 请求停止当前轮');
+        await post([snapshot([], [], 18), {type:'streamEnd',sessionId:sid}]);
+        check(await page.eval(`return document.querySelector('#input').value === '已有草稿\\n\\n用户还没投递的补充';`), '停止后只把用户未投递输入写回草稿，不混入自动结果');
     } finally {
         await page.eval(`window.__queueApi.postMessage = window.__queueOrig; return true;`);
     }

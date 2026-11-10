@@ -1033,6 +1033,8 @@
       toolStats: { calls: 0, totalMs: 0, byTool: new Map(), slowest: [], seen: new Set() },
       queuedSteering: [],
       queuedFollowUp: [],
+      queueHiddenSteering: [],
+      queueHiddenFollowUp: [],
       queueRevision: 0,
       queueEditable: false,
       queueAction: null,
@@ -4701,8 +4703,11 @@
   function renderQueueBar(st) {
     if (activeId !== st.id) { return; }
     const items = [
-      ...(st.queuedSteering || []).map((text, index) => ({ text, index, kind: "steering" })),
-      ...(st.queuedFollowUp || []).map((text, index) => ({ text, index, kind: "followUp" })),
+      // 隐藏自动交回的消息，但保留 pi 原索引：修改 / 取消不能落到邻近消息上。
+      ...(st.queuedSteering || []).map((text, index) => ({ text, index, kind: "steering" }))
+        .filter(item => !st.queueHiddenSteering.includes(item.index)),
+      ...(st.queuedFollowUp || []).map((text, index) => ({ text, index, kind: "followUp" }))
+        .filter(item => !st.queueHiddenFollowUp.includes(item.index)),
     ];
     const edit = st.queueEdit;
     const focused = document.activeElement?.classList.contains("qb-edit-input");
@@ -4711,7 +4716,9 @@
       let at = items.findIndex(item => item.kind === edit.kind && item.index === edit.index && item.text === edit.text);
       // 原消息若已投递，仍保留行内文字供复制；绝不把它自动重新发送。
       if (at < 0) {
-        at = Math.min(items.length, edit.index + (edit.kind === "followUp" ? st.queuedSteering.length : 0));
+        at = items.findIndex(item => (item.kind === edit.kind && item.index >= edit.index)
+          || (edit.kind === "steering" && item.kind === "followUp"));
+        if (at < 0) { at = items.length; }
         items.splice(at, 0, { text: edit.text, index: edit.index, kind: edit.kind });
       }
       items[at].editing = true;
@@ -11795,7 +11802,10 @@
   function abortActiveTab() {
     if (!activeSessionStreaming()) { return false; }
     const focus = sessions.get(activeId);
-    if (focus) { focus.pendingSteerRestore = (focus.queuedSteering || []).slice(); }
+    if (focus) {
+      focus.pendingSteerRestore = (focus.queuedSteering || [])
+        .filter((_, index) => !focus.queueHiddenSteering.includes(index));
+    }
     vscode.postMessage({ type: "abort", sessionId: activeId });
     return true;
   }
@@ -12670,6 +12680,8 @@
       case "queueUpdate":
         t.queuedSteering = Array.isArray(msg.steering) ? msg.steering : [];
         t.queuedFollowUp = Array.isArray(msg.followUp) ? msg.followUp : [];
+        t.queueHiddenSteering = Array.isArray(msg.hiddenSteering) ? msg.hiddenSteering : [];
+        t.queueHiddenFollowUp = Array.isArray(msg.hiddenFollowUp) ? msg.hiddenFollowUp : [];
         t.queueRevision = typeof msg.revision === "number" ? msg.revision : 0;
         t.queueEditable = msg.editable === true;
         // abort 后队列被清空：把未投递的 steer 文本合并写回输入框（与 TUI 一致）

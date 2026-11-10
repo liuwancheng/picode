@@ -125,11 +125,12 @@ npm run web:shot -- --width 420 --height 800 --script dev/followBottom.js
 # 断线那段 pi 已经把排队的投出去了，回来还写着“在排队”；重画时后端要补一份排队状态的真相）：
 npm run web:shot -- --fake-pi --script dev/queueResync.js
 
-# 验排队消息行尾的修改 / 取消（假数据，不向模型发消息）：重复原文、等待期间禁用、
+# 验排队消息只显示用户输入（假数据，不向模型发消息）：自动交回内容隐藏、同文来源区分、
+# 隐藏后仍按原索引修改 / 取消、停止后只恢复用户输入；另验重复原文、等待期间禁用、
 # 行内编辑 / 保存 / 放弃、保持主草稿、切会话后的迟到回执、投递竞态和不支持的 pi。
 npm run web:shot -- --fake-pi --width 1000 --height 800 --script dev/queueActions.js
 npm run web:shot -- --fake-pi --theme dark --width 420 --height 900 --script dev/queueActions.js
-# 真 pi SDK 的原子队列桥回归（不调用模型、不清空重排）：
+# 真 pi SDK 的来源区分与原子队列桥回归（异步并发、同文用户输入、批量投递；不调用模型、不清空重排）：
 node dev/queueBridgeBackend.mjs
 # 真 pi RPC + 真后端 + 浏览器整条链（只用 steer/follow_up 排队，不调用模型）：
 node dev/queueRpc.js

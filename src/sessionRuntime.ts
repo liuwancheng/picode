@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { randomUUID } from "crypto";
-import { QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, decodeQueueResult, isQueueActionRequest,
+import { QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, decodeQueueResult, encodeQueuePrompt, isQueueActionRequest,
     type QueueActionResult } from "./queueBridgeSource";
 import { PiClient } from "./piClient";
 import { ASK_DECODER, AskDoneNotice, AskRequest } from "./askProtocol";
@@ -240,6 +240,9 @@ export class SessionRuntime {
      *  回来就还照着旧的样子写着“在排队”，实际上早就发出去了。 */
     private queuedSteering: string[] = [];
     private queuedFollowUp: string[] = [];
+    /** 自动结果仍在完整队列中，界面只跳过这些原摘要索引。 */
+    private hiddenSteering: number[] = [];
+    private hiddenFollowUp: number[] = [];
     private queueRevision = 0;
     private queueEditable = false;
     private queueNativeSessionId = "";
@@ -597,6 +600,8 @@ export class SessionRuntime {
         this.failQueueActions("会话已经切换，请刷新后重试");
         this.queuedSteering = [];
         this.queuedFollowUp = [];
+        this.hiddenSteering = [];
+        this.hiddenFollowUp = [];
         this.queueRevision = 0;
         this.queueEditable = false;
         this.queueNativeSessionId = "";
@@ -614,6 +619,7 @@ export class SessionRuntime {
 
     private queueSnapshot(): Record<string, unknown> {
         return { type: "queueUpdate", steering: this.queuedSteering.slice(), followUp: this.queuedFollowUp.slice(),
+            hiddenSteering: this.hiddenSteering.slice(), hiddenFollowUp: this.hiddenFollowUp.slice(),
             revision: this.queueRevision, editable: this.queueEditable };
     }
 
@@ -639,6 +645,8 @@ export class SessionRuntime {
             && this.queueNativeSessionId === nativeSessionId && this.queueRevision === input.revision;
         const texts = input.kind === "steering" ? this.queuedSteering : this.queuedFollowUp;
         if (!fresh() || texts[input.index] !== input.text) { return fail("排队消息已经变化，请按最新队列重试"); }
+        const hidden = input.kind === "steering" ? this.hiddenSteering : this.hiddenFollowUp;
+        if (hidden.includes(input.index)) { return fail("自动排队消息不支持修改或取消"); }
         // 当前命令须真由扩展提供，不能把未知 / 命令作为普通提问交给模型。
         const commands = await client.request<{ commands: RpcCommandInfo[] }>({ type: "get_commands" }, 5000);
         if (!fresh()) { return fail("排队消息或会话已经变化，请按最新队列重试"); }
@@ -930,7 +938,7 @@ export class SessionRuntime {
             : opts?.followUp
                 ? "followUp"
                 : this.streaming ? "steer" : "followUp";
-        const cmd: Record<string, unknown> = { type: "prompt", message, streamingBehavior };
+        const cmd: Record<string, unknown> = { type: "prompt", message: encodeQueuePrompt(message, fromPlugin), streamingBehavior };
         if (hasImages) {
             cmd.images = images!.map((img) => ({
                 type: "image",
@@ -1056,6 +1064,10 @@ export class SessionRuntime {
                 // steering/followUp 队列变化（steer 排队/投递/abort 后清空）
                 this.queuedSteering = Array.isArray(evt.steering) ? evt.steering.slice() : [];
                 this.queuedFollowUp = Array.isArray(evt.followUp) ? evt.followUp.slice() : [];
+                this.hiddenSteering = Array.isArray(evt.queueHiddenSteering) ? evt.queueHiddenSteering.filter((index: unknown) =>
+                    Number.isSafeInteger(index) && (index as number) >= 0 && (index as number) < this.queuedSteering.length) : [];
+                this.hiddenFollowUp = Array.isArray(evt.queueHiddenFollowUp) ? evt.queueHiddenFollowUp.filter((index: unknown) =>
+                    Number.isSafeInteger(index) && (index as number) >= 0 && (index as number) < this.queuedFollowUp.length) : [];
                 this.queueRevision = Number.isSafeInteger(evt.queueRevision) && evt.queueRevision >= 0 ? evt.queueRevision : 0;
                 this.queueNativeSessionId = typeof evt.queueSessionId === "string" ? evt.queueSessionId : "";
                 this.queueEditable = evt.queueEditable === true && this.queueRevision > 0 && !!this.queueNativeSessionId;

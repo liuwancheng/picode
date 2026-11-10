@@ -1,3 +1,10 @@
+/** 固定传输标记：多个后端可共用桥文件；用户输入同一标记时转义，来源不靠正文猜。 */
+export const QUEUE_PROMPT_PREFIX = "__PICHAT_QUEUE_PROMPT__:";
+export function encodeQueuePrompt(text: string, automatic: boolean): string {
+    if (!automatic && !text.startsWith(QUEUE_PROMPT_PREFIX)) { return text; }
+    return QUEUE_PROMPT_PREFIX + Buffer.from(JSON.stringify({ text, automatic }), "utf8").toString("base64");
+}
+
 /** 逐条修改/取消排队消息：只在 pi 已确认的双队列结构上同步操作，不清空重排。 */
 export const QUEUE_REMOVE_COMMAND = "pichat-queue-remove";
 export const QUEUE_RESULT_PREFIX = "__PICHAT_QUEUE_RESULT__:";
@@ -48,9 +55,11 @@ export function decodeQueueResult(message: string): QueueActionResult | undefine
 /** 独立文件的价值：封住 pi 私有结构依赖；结构变化就关掉操作，其他桥与显示队列不受影响。 */
 export const QUEUE_BRIDGE_SOURCE = String.raw`
 import { AgentSession } from "@earendil-works/pi-coding-agent";
+import { AsyncLocalStorage } from "node:async_hooks";
+const PROMPT_PREFIX = ${JSON.stringify(QUEUE_PROMPT_PREFIX)};
 const COMMAND = ${JSON.stringify(QUEUE_REMOVE_COMMAND)};
 const RESULT_PREFIX = ${JSON.stringify(QUEUE_RESULT_PREFIX)};
-const KEY = Symbol.for("pichat.queueBridge.v1");
+const KEY = Symbol.for("pichat.queueBridge.v2");
 
 function mutableArray(value) {
     return Array.isArray(value) && Object.isExtensible(value) && !Object.isSealed(value)
@@ -95,33 +104,110 @@ function nativeIndices(texts, messages) {
     return indices.length === texts.length ? indices : undefined;
 }
 
+// native drain 可一次取走多条，AgentSession 的摘要却在 message_start 时逐条移除。
+// 保留上一份摘要对应的消息对象直到它被移除；来源只来自 WeakSet，不来自文字。
+function hiddenIndices(state, session, kind, texts, messages) {
+    let views = state.views.get(session);
+    if (!views) { views = {}; state.views.set(session, views); }
+    const native = Array.isArray(messages) ? nativeIndices(texts, messages) : undefined;
+    let users = native?.map(index => messages[index]);
+    const previous = views[kind];
+    if (!users && previous) {
+        if (texts.length === previous.texts.length
+            && texts.every((text, index) => text === previous.texts[index])) {
+            users = previous.users;
+        } else if (texts.length === previous.texts.length - 1) {
+            // SDK 用 indexOf 移除首个同文摘要，重复原文也按相同规则对齐对象。
+            const removed = previous.texts.findIndex((_text, index) =>
+                texts.every((text, next) => text === previous.texts[next < index ? next : next + 1]));
+            if (removed >= 0) { users = previous.users.filter((_message, index) => index !== removed); }
+        }
+    }
+    if (!users) { delete views[kind]; return []; }
+    views[kind] = { texts: texts.slice(), users };
+    return users.flatMap((message, index) => state.hidden.has(message) ? [index] : []);
+}
+
 function install() {
     const proto = AgentSession?.prototype;
-    if (!proto || typeof proto._emit !== "function" || typeof proto.prompt !== "function") { return undefined; }
+    if (!proto || ["_emit", "prompt", "_queueSteer", "_queueFollowUp"].some(name => typeof proto[name] !== "function")) {
+        return undefined;
+    }
     if (proto[KEY]) { return proto[KEY]; }
-    const state = { sessions: new Map(), handlers: new WeakSet(),
+    const state = { sessions: new Map(), handlers: new WeakSet(), hidden: new WeakSet(),
+        views: new WeakMap(), context: new AsyncLocalStorage(),
         // 新进程/新会话不复用旧 revision；仍在安全整数范围内，每个 queue_update 递增。
         revision: Date.now() * 1000 + Math.floor(Math.random() * 1000) };
     const emit = proto._emit;
     const prompt = proto.prompt;
     proto._emit = function(event) {
         if (event?.type === "queue_update") {
+            const call = state.context.getStore();
+            if (call?.session === this && call.kind && !call.flushing) {
+                call.events.push(event);
+                return;
+            }
+            if (call?.session === this && call.kind && call.automatic) {
+                const messages = call.kind === "steering" ? this.agent?.steeringQueue?.messages : this.agent?.followUpQueue?.messages;
+                // 已核对的 SDK 在同步调用内只追加一条 native user，绝不按正文匹配来源。
+                if (Array.isArray(messages) && messages.length === call.before.length + 1
+                    && call.before.every((message, index) => message === messages[index])
+                    && messages[messages.length - 1]?.role === "user") {
+                    state.hidden.add(messages[messages.length - 1]);
+                }
+            }
             const revision = ++state.revision;
             state.sessions.set(this.sessionManager, { session: this, revision });
             let editable = false;
             let sessionId;
+            let hiddenSteering = [], hiddenFollowUp = [];
             try {
                 editable = !!shape(this);
+                hiddenSteering = hiddenIndices(state, this, "steering", event.steering, this.agent?.steeringQueue?.messages);
+                hiddenFollowUp = hiddenIndices(state, this, "followUp", event.followUp, this.agent?.followUpQueue?.messages);
                 if (typeof this.sessionManager?.getSessionId === "function") {
                     sessionId = this.sessionManager.getSessionId();
                 }
             } catch { /* 未知结构不影响队列显示 */ }
-            event = { ...event, queueRevision: revision, queueEditable: editable, queueSessionId: sessionId };
+            event = { ...event, queueRevision: revision, queueEditable: editable, queueSessionId: sessionId,
+                queueHiddenSteering: hiddenSteering, queueHiddenFollowUp: hiddenFollowUp };
         }
         return emit.call(this, event);
     };
+    for (const [name, kind] of [["_queueSteer", "steering"], ["_queueFollowUp", "followUp"]]) {
+        const queue = proto[name];
+        proto[name] = function(...args) {
+            const parent = state.context.getStore();
+            const messages = kind === "steering" ? this.agent?.steeringQueue?.messages : this.agent?.followUpQueue?.messages;
+            const call = { session: this, kind, automatic: parent?.session === this && parent.automatic === true,
+                before: Array.isArray(messages) ? messages.slice() : [], events: [], flushing: false };
+            return state.context.run(call, () => {
+                try { return queue.apply(this, args); }
+                finally {
+                    // SDK 1.5.0 虽返回 Promise，入队与发事件均无 await；同一调用栈内完成转发。
+                    call.flushing = true;
+                    for (const event of call.events) { this._emit(event); }
+                }
+            });
+        };
+    }
     // get_commands 与 prompt 之间可能 /reload。内部命令若消失或被别的扩展顶掉，绝不退回模型。
     proto.prompt = function(text, options) {
+        // SDK 会推迟 agent_settled 订阅者发出的输入；让它保存传输载荷，稍后再解码。
+        if (this._isEmittingAgentSettled) { return prompt.call(this, text, options); }
+        let automatic = false;
+        if (typeof text === "string" && text.startsWith(PROMPT_PREFIX)) {
+            try {
+                const encoded = text.slice(PROMPT_PREFIX.length);
+                const buffer = Buffer.from(encoded, "base64");
+                const payload = JSON.parse(buffer.toString("utf8"));
+                if (buffer.toString("base64") === encoded && typeof payload.text === "string"
+                    && typeof payload.automatic === "boolean") {
+                    text = payload.text;
+                    automatic = payload.automatic;
+                }
+            } catch { /* 非协议载荷仍是普通用户原文 */ }
+        }
         if (typeof text === "string" && (text === "/" + COMMAND || text.startsWith("/" + COMMAND + " "))) {
             const command = this._extensionRunner?.getCommand?.(COMMAND);
             if (!command || !state.handlers.has(command.handler)) {
@@ -129,7 +215,8 @@ function install() {
             }
             return prompt.call(this, text, { ...options, expandPromptTemplates: true });
         }
-        return prompt.call(this, text, options);
+        // 每次 prompt 都建独立作用域，异步 input 处理、同文输入与并发会话互不污染。
+        return state.context.run({ session: this, automatic }, () => prompt.call(this, text, options));
     };
     Object.defineProperty(proto, KEY, { value: state });
     return state;
@@ -173,6 +260,7 @@ export default function queueBridge(pi) {
                 throw new Error("这条排队消息已经变化，请按最新队列重试");
             }
             const message = messages[indices[request.index]];
+            if (state.hidden.has(message)) { throw new Error("自动排队消息不支持修改或取消"); }
             const content = userContent(message);
             if (request.act === "edit") {
                 const textField = Object.getOwnPropertyDescriptor(content, "text");
