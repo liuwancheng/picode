@@ -9,6 +9,8 @@
  *   2. 拖顶上那条：整块跟着走（按在标签、按钮上不算）；
  *   3. 拖右下角那个角：大小跟着变（有最小值）；
  *   4. 刷新页面再打开同一个文件：还摆在刚才那儿、还是刚才那么大（记在这台设备里）；
+ *   4b. 顶上那颗放大按钮（双击标题条也行）：铺满顶条底下那一整块、顶条仍露着；
+ *      这时拖动不挪位、改大小那颗角收起；再点一下还原回原来那块，刷新后还是放大的；
  *   5. 顶上那两颗 A− / A+：只改正文的字号（一次一像素），到两头那颗按钮按下去，
  *      字号也记在这台设备里（刷新之后还是这个字号）；记着的字号要是落在能调的范围外
  *      （以前调小过、后来界面字号又改大了），不当数：正文回到跟界面字号一样大、A− 不灰；
@@ -144,6 +146,50 @@ module.exports = async (page) => {
         && Math.abs(after.w - before.w) <= 1 && Math.abs(after.h - before.h) <= 1,
         JSON.stringify({ before: [before.left, before.top, before.w, before.h], after: [after.left, after.top, after.w, after.h], reopened: reopened }));
     await page.shot("viewerbox-4-remembered.png");
+
+    // ---- 4b. 放大 / 还原：铺满顶条底下那一整块，还原回原来那块 ----
+    const beforeMax = await box();
+    const maxBtnNow = () => page.eval(`
+        const b = document.getElementById("fileMax");
+        return JSON.stringify({ shown: !!b && getComputedStyle(b).display !== "none", title: b ? b.title : "" });
+    `).then(JSON.parse);
+    const maxBtn = await maxBtnNow();
+    check("顶上那颗放大按钮在（电脑上那块浮着时）", maxBtn.shown, JSON.stringify(maxBtn));
+    await page.eval(`document.getElementById("fileMax").click(); return true;`);
+    await page.sleep(400);
+    const maxed = await box();
+    check("点放大：铺满顶条底下那一整块（左右贴边、顶条仍露着）",
+        maxed.w >= (await page.eval("return innerWidth;")) - 1 && maxed.left === 0
+        && maxed.top === maxed.topBarBottom && maxed.h >= (await page.eval("return innerHeight;")) - maxed.topBarBottom - 1,
+        JSON.stringify({ w: maxed.w, left: maxed.left, top: maxed.top, h: maxed.h, topBar: maxed.topBarBottom }));
+    check("放大着的时候：改大小那颗角收起、顶条不再显示「移动」手艺",
+        !maxed.gripShown && maxed.dragCursor !== "move", JSON.stringify({ grip: maxed.gripShown, cursor: maxed.dragCursor }));
+    check("放大按钮变成「还原」", (await maxBtnNow()).title.indexOf("还原") >= 0, (await maxBtnNow()).title);
+    await page.shot("viewerbox-4b-maxed.png");
+    // 放大着的时候拖顶条：不动（要挪先还原）
+    await dragMouse(maxed.barX, maxed.barY, maxed.barX - 60, maxed.barY);
+    const stillMaxed = await box();
+    check("放大着的时候拖顶条不挪位", stillMaxed.left === maxed.left && stillMaxed.top === maxed.top,
+        JSON.stringify({ left: stillMaxed.left, top: stillMaxed.top }));
+    await page.eval(`document.getElementById("fileMax").click(); return true;`);
+    await page.sleep(400);
+    const restored = await box();
+    check("再点一下：还原成原来那块（位置、大小都跟放大前一样）",
+        Math.abs(restored.left - beforeMax.left) <= 1 && Math.abs(restored.top - beforeMax.top) <= 1
+        && Math.abs(restored.w - beforeMax.w) <= 1 && Math.abs(restored.h - beforeMax.h) <= 1,
+        JSON.stringify({ before: [beforeMax.left, beforeMax.top, beforeMax.w, beforeMax.h], after: [restored.left, restored.top, restored.w, restored.h] }));
+    // 双击标题条也能放大（不用去够那颗按钮）
+    const barPoint = { x: restored.barX, y: restored.barY };
+    for (const [type, clickCount] of [["mousePressed", 1], ["mouseReleased", 1], ["mousePressed", 2], ["mouseReleased", 2]]) {
+        await page.cdp.send("Input.dispatchMouseEvent", { type, x: barPoint.x, y: barPoint.y, button: "left", clickCount });
+        await page.sleep(40);
+    }
+    await page.sleep(400);
+    const byDoubleClick = await box();
+    check("双击标题条：也能放大", byDoubleClick.w >= (await page.eval("return innerWidth;")) - 1 && byDoubleClick.left === 0,
+        JSON.stringify({ w: byDoubleClick.w, left: byDoubleClick.left }));
+    await page.eval(`document.getElementById("fileMax").click(); return true;`);
+    await page.sleep(300);
 
     // 顶上那两颗字号按钮：只改正文（代码行的字号），一次一像素；到两头按下去
     const fontNow = async () => JSON.parse(await page.eval(`

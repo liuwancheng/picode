@@ -1872,11 +1872,15 @@
       0 8px 28px rgba(0, 0, 0, 0.28);
   }
   #fileStage.floating #fileBar { cursor: move; }
+  /* 放大了：铺满顶条底下那一块，圆角收掉；没得挪也没得改大小（要挪先还原） */
+  #fileStage.floating.maxed { border-radius: 0; }
+  #fileStage.floating.maxed #fileBar { cursor: default; }
   /* 拖着挪 / 拖角改大小的时候：别顺手选中了字，光标也别在那儿闪来闪去 */
   body.file-box-moving { user-select: none; cursor: move; }
   body.file-box-moving #fileBar, body.file-box-moving #fileStageGrip { cursor: inherit; }
   /* 右下角那颗改大小的角：只在浮着的时候露面 */
   #fileStageGrip { display: none; }
+  #fileStage.floating.maxed #fileStageGrip { display: none; }
   #fileStage.floating #fileStageGrip {
     display: block; position: absolute; right: 0; bottom: 0; z-index: 3;
     width: 18px; height: 18px; cursor: nwse-resize; touch-action: none;

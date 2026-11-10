@@ -27,6 +27,9 @@
     // 粗一点的勾：跟上面那颗叉同款同大小（会话行尾的确认用，一颗勾一颗叉并排）。
     "check-bold": '<svg width="12" height="12" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M2.6 8.6 L6.4 12.4 L13.4 3.8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>',
     "link-external": '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true"><path d="M15 9.5V12.5C15 13.879 13.879 15 12.5 15H3.5C2.121 15 1 13.879 1 12.5V3.5C1 2.121 2.121 1 3.5 1H6.5C6.776 1 7 1.224 7 1.5C7 1.776 6.776 2 6.5 2H3.5C2.673 2 2 2.673 2 3.5V12.5C2 13.327 2.673 14 3.5 14H12.5C13.327 14 14 13.327 14 12.5V9.5C14 9.224 14.224 9 14.5 9C14.776 9 15 9.224 15 9.5ZM14.5 1H9.5C9.224 1 9 1.224 9 1.5C9 1.776 9.224 2 9.5 2H13.293L9.147 6.146C8.952 6.341 8.952 6.658 9.147 6.853C9.245 6.951 9.373 6.999 9.501 6.999C9.629 6.999 9.757 6.95 9.855 6.853L14.001 2.707V6.5C14.001 6.776 14.225 7 14.501 7C14.777 7 15.001 6.776 15.001 6.5V1.5C15.001 1.224 14.777 1 14.501 1H14.5Z"/></svg>',
+    // 放大的那颗：一个方框；还原那颗是两个错开的方框（看文件的弹窗顶上用）
+    maximize: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="2.6" y="2.6" width="10.8" height="10.8" rx="1.2"/></svg>',
+    restore: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="2.4" y="5.2" width="8.4" height="8.4" rx="1.2"/><path d="M5.4 5.2V3.6a1.2 1.2 0 0 1 1.2-1.2h6.6a1.2 1.2 0 0 1 1.2 1.2v6.6a1.2 1.2 0 0 1-1.2 1.2h-1.6"/></svg>',
     discard: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true"><path d="M3.00098 2.5C3.00098 2.22386 3.22483 2 3.50098 2C3.77712 2 4.00098 2.22386 4.00098 2.5V6.34262L7.17202 3.17157C8.73412 1.60948 11.2668 1.60948 12.8289 3.17157C14.391 4.73367 14.391 7.26633 12.8289 8.82843L7.80375 13.8536C7.60849 14.0488 7.2919 14.0488 7.09664 13.8536C6.90138 13.6583 6.90138 13.3417 7.09664 13.1464L12.1218 8.12132C13.2933 6.94975 13.2933 5.05025 12.1218 3.87868C10.9502 2.70711 9.0507 2.70711 7.87913 3.87868L4.75781 7H8.50098C8.77712 7 9.00098 7.22386 9.00098 7.5C9.00098 7.77614 8.77712 8 8.50098 8H3.60098C3.26961 8 3.00098 7.73137 3.00098 7.4V2.5Z"/></svg>',
     check: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true"><path d="M13.6572 3.13573C13.8583 2.9465 14.175 2.95614 14.3643 3.15722C14.5535 3.35831 14.5438 3.675 14.3428 3.86425L5.84277 11.8642C5.64597 12.0494 5.33756 12.0446 5.14648 11.8535L1.64648 8.35351C1.45121 8.15824 1.45121 7.84174 1.64648 7.64647C1.84174 7.45121 2.15825 7.45121 2.35351 7.64647L5.50976 10.8027L13.6572 3.13573Z"/></svg>',
     clippy: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d="M5.08535 2.00049C5.29127 1.41789 5.84689 1.00049 6.5 1.00049H9.5C10.1531 1.00049 10.7087 1.41789 10.9146 2.00049H11.5C12.3284 2.00049 13 2.67206 13 3.50049V8.10026C12.919 8.12889 12.8402 8.16457 12.7646 8.20715C12.4603 8.37833 12.2253 8.65027 12.1 8.97611L12 8.87618V3.50049C12 3.22435 11.7761 3.00049 11.5 3.00049H10.9146C10.7087 3.58308 10.1531 4.00049 9.5 4.00049H6.5C5.84689 4.00049 5.29127 3.58308 5.08535 3.00049H4.5C4.22386 3.00049 4 3.22435 4 3.50049V13.5005C4 13.7766 4.22386 14.0005 4.5 14.0005H8V14.5001C8.00164 14.6722 8.03284 14.8413 8.09101 15.0005H4.5C3.67157 15.0005 3 14.3289 3 13.5005V3.50049C3 2.67206 3.67157 2.00049 4.5 2.00049H5.08535ZM6.5 2.00049C6.22386 2.00049 6 2.22435 6 2.50049C6 2.77663 6.22386 3.00049 6.5 3.00049H9.5C9.77614 3.00049 10 2.77663 10 2.50049C10 2.22435 9.77614 2.00049 9.5 2.00049H6.5Z"/><path d="M11.916 10.7783C11.971 10.6959 12.0002 10.599 12 10.5C11.9998 10.4345 11.9869 10.3696 11.962 10.309C11.937 10.2484 11.9003 10.1934 11.854 10.147L9.85401 8.147C9.80801 8.09999 9.75288 8.0629 9.69201 8.038C9.63109 8.01296 9.56587 8.00005 9.50001 8C9.36766 8.00003 9.24071 8.05253 9.14701 8.146L7.14701 10.146C7.10043 10.1924 7.06346 10.2476 7.03824 10.3084C7.01301 10.3691 7.00002 10.4342 7.00001 10.5C6.99943 10.5993 7.02844 10.6965 7.08334 10.7793C7.13824 10.8621 7.21655 10.9266 7.30827 10.9647C7.39999 11.0028 7.50098 11.0127 7.59835 10.9931C7.69572 10.9736 7.78507 10.9255 7.85501 10.855L9.00001 9.708L9.00001 14.5C9.00001 14.6326 9.05269 14.7598 9.14645 14.8536C9.24022 14.9473 9.3674 15 9.50001 15C9.63262 15 9.75979 14.9473 9.85356 14.8536C9.94733 14.7598 10 14.6326 10 14.5L10 9.708L11.146 10.854C11.2159 10.9241 11.3051 10.9719 11.4022 10.9912C11.4993 11.0106 11.6 11.0007 11.6915 10.9628C11.7829 10.9249 11.8611 10.8606 11.916 10.7783Z"/><path d="M11.084 13.2217C11.0291 13.3041 10.9998 13.401 11 13.5C11.0002 13.5655 11.0131 13.6304 11.038 13.691C11.063 13.7516 11.0997 13.8066 11.146 13.853L13.146 15.853C13.192 15.9 13.2471 15.9371 13.308 15.962C13.3689 15.987 13.4341 16 13.5 16C13.6324 16 13.7593 15.9475 13.853 15.854L15.853 13.854C15.8996 13.8076 15.9365 13.7524 15.9618 13.6916C15.987 13.6309 16 13.5658 16 13.5C16.0006 13.4007 15.9716 13.3035 15.9167 13.2207C15.8618 13.1379 15.7835 13.0734 15.6917 13.0353C15.6 12.9972 15.499 12.9873 15.4017 13.0069C15.3043 13.0264 15.2149 13.0745 15.145 13.145L14 14.292V9.5C14 9.36739 13.9473 9.24021 13.8536 9.14645C13.7598 9.05268 13.6326 9 13.5 9C13.3674 9 13.2402 9.05268 13.1464 9.14645C13.0527 9.24021 13 9.36739 13 9.5V14.292L11.854 13.146C11.7841 13.0759 11.6949 13.0281 11.5978 13.0088C11.5007 12.9894 11.4 12.9993 11.3085 13.0372C11.2171 13.0751 11.1389 13.1394 11.084 13.2217Z"/></svg>',
@@ -7126,6 +7129,8 @@
   const FILE_SIDEBAR_WIDTH_STORE_KEY = "pichat.fileSidebarWidth";
   /** 弹窗那一块的位置与大小（电脑上拖出来、拖右下角改出来的）：跟宽度一样记在这台设备里。 */
   const FILE_VIEWER_BOX_STORE_KEY = "pichat.fileViewerBox";
+  /** 弹窗放大到顶条底下那一整块（记在这台设备里）：下次打开还是放大的。 */
+  const FILE_VIEWER_MAXED_STORE_KEY = "pichat.fileViewerMaxed";
   /** 弹窗里正文的字号（像素数）：也记在这台设备里（没设过就是 0，跟界面字号走）。 */
   const FILE_VIEWER_FONT_STORE_KEY = "pichat.fileViewerFont";
   /**
@@ -7181,7 +7186,8 @@
     // 正文的字号（像素数，0 = 没设过、跟界面字号走）：见 applyFileViewerFont
     font: 0,
     fontMinus: null, fontPlus: null,
-
+    // 放大了（顶条底下那一整块）：还原时按 box 里记着的那一份摆回去
+    maxed: false,
   };
   /**
    * 每个会话自己那一份：会话 id → { path, tabs, at, viewLine, viewTop }，
@@ -7737,10 +7743,33 @@
   /** 把弹窗那一块现在的样子记进本机（拖完、改完大小那一下）。 */
   function rememberFileViewerBox() {
     const stage = fileSidebar.stage;
-    if (!stage) { return; }
+    // 放大的时候拖不动、也改不了大小：留着原来那一块，还原时才回得去
+    if (!stage || fileSidebar.maxed) { return; }
     const r = stage.getBoundingClientRect();
     fileSidebar.box = { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.left), y: Math.round(r.top) };
     try { localStorage.setItem(FILE_VIEWER_BOX_STORE_KEY, JSON.stringify(fileSidebar.box)); } catch (e) { /* 存不了就只管这一次 */ }
+  }
+
+  /** 记在这台设备里的「放大了」：没记过就是没放大。 */
+  function readFileViewerMaxed() {
+    try { return localStorage.getItem(FILE_VIEWER_MAXED_STORE_KEY) === "1"; } catch (e) { return false; }
+  }
+
+  /** 放大 / 还原（顶条底下那一整块 ↔ 原来那一块）。手机上那一块本来就铺满整屏，没有这一下。 */
+  function toggleFileViewerMax() {
+    const stage = fileSidebar.stage;
+    if (!stage || !stage.classList.contains("floating")) { return; }
+    if (!fileSidebar.maxed) {
+      // 先记下现在这块：还原时还摆在这儿、这么大
+      const r = stage.getBoundingClientRect();
+      fileSidebar.box = { w: Math.round(r.width), h: Math.round(r.height), x: Math.round(r.left), y: Math.round(r.top) };
+      try { localStorage.setItem(FILE_VIEWER_BOX_STORE_KEY, JSON.stringify(fileSidebar.box)); } catch (e) { /* 存不了就只管这一次 */ }
+    }
+    fileSidebar.maxed = !fileSidebar.maxed;
+    try { localStorage.setItem(FILE_VIEWER_MAXED_STORE_KEY, fileSidebar.maxed ? "1" : "0"); } catch (e) { /* 存不了就只管这一次 */ }
+    syncFileViewerBox();
+    refreshFileRows();
+    syncFileBar();
   }
 
   /** 记在这台设备里的正文字号：没设过 / 记坏了给 0（跟界面字号走）。 */
@@ -7817,7 +7846,7 @@
     const stage = fileSidebar.stage;
     if (!stage) { return; }
     if (IS_TOUCH_DEVICE || window.innerWidth < 700) {
-      stage.classList.remove("floating");
+      stage.classList.remove("floating", "maxed");
       stage.style.left = "0px";
       stage.style.top = "0px";
       stage.style.width = "100%";
@@ -7825,6 +7854,16 @@
       return;
     }
     const top0 = topBarBottom();   // 顶条底下算起
+    // 放大了：顶条底下那一整块（顶条还露着，看文件的时候照样能切会话、看状态）
+    if (fileSidebar.maxed) {
+      stage.classList.add("floating", "maxed");
+      stage.style.left = "0px";
+      stage.style.top = top0 + "px";
+      stage.style.width = "100%";
+      stage.style.height = Math.max(FILE_VIEWER_MIN_H, window.innerHeight - top0) + "px";
+      return;
+    }
+    stage.classList.remove("maxed");
     const maxW = Math.max(FILE_VIEWER_MIN_W, window.innerWidth - 24);
     const maxH = Math.max(FILE_VIEWER_MIN_H, window.innerHeight - top0 - 24);
     const box = fileSidebar.box;
@@ -7860,7 +7899,8 @@
     };
     /** 按住之后跟着指针走：start 是按下那一刻的位置/大小，size 为真就是改大小而不是挪。 */
     const beginDrag = (e, size) => {
-      if (e.button !== 0 || !stage.classList.contains("floating")) { return; }
+      // 放大着的时候没得挪、也没得改大小（要挪先点那颗还原）
+      if (e.button !== 0 || !stage.classList.contains("floating") || fileSidebar.maxed) { return; }
       e.preventDefault();
       const r = stage.getBoundingClientRect();
       const state = { size: size, px: e.clientX, py: e.clientY, x: r.left, y: r.top, w: r.width, h: r.height, moved: false };
@@ -7894,6 +7934,11 @@
       // 那几颗按钮、那几格标签按自己的事办（点标签切过去、点叉关掉）
       if (e.target.closest("button, .file-tab")) { return; }
       beginDrag(e, false);
+    });
+    // 双击顶上那条：放大 / 还原（跟别的窗口一样，不必去够那颗按钮）
+    bar.addEventListener("dblclick", (e) => {
+      if (e.target.closest("button, .file-tab")) { return; }
+      toggleFileViewerMax();
     });
     grip.addEventListener("pointerdown", (e) => beginDrag(e, true));
   }
@@ -7954,6 +7999,15 @@
     }
     if (editing) { syncFileEditNote(fileTab); }
     bar.hidden = !viewing;
+    const maxBtn = document.getElementById("fileMax");
+    if (maxBtn) {
+      // 手机上那块铺满整屏，没有放大这一说
+      maxBtn.hidden = !fileSidebar.stage || !fileSidebar.stage.classList.contains("floating");
+      const maxed = fileSidebar.maxed;
+      maxBtn.innerHTML = maxed ? ICONS.restore : ICONS.maximize;
+      maxBtn.title = maxed ? "还原到原来那块（双击标题条也行）" : "放大到整个区域（双击标题条也行）";
+      maxBtn.setAttribute("aria-label", maxed ? "还原" : "放大");
+    }
     const many = viewing && fileSidebar.view.tabs.length > 1;
     if (fileSidebar.tabs) { fileSidebar.tabs.hidden = !many; }
     renderFileTabs();
@@ -9614,6 +9668,8 @@
           '<button id="fileRollback" class="file-bar-btn wide" type="button" title="回滚" aria-label="回滚">' + ICONS.discard + ' 回滚</button>' +
           '<button id="fileFontMinus" class="file-bar-btn" type="button" title="字小一点" aria-label="字小一点">A−</button>' +
           '<button id="fileFontPlus" class="file-bar-btn" type="button" title="字大一点" aria-label="字大一点">A+</button>' +
+          // 放大 / 还原（电脑上那块浮着的才露面；双击标题条也一样）
+          '<button id="fileMax" class="file-bar-btn" type="button" title="放大到整个区域" aria-label="放大">' + ICONS.maximize + '</button>' +
           '<button id="fileCloseFile" type="button" title="关掉（Esc）" aria-label="关掉">' + ICONS["close-bold"] + '</button>' +
         '</div>' +
         '<div id="fileBody" class="pk-body"></div>' +
@@ -9644,6 +9700,7 @@
     fileSidebar.pullHint = stage.querySelector("#filePullHint");
     fileSidebar.pullHintText = stage.querySelector("#filePullHint span");
     fileSidebar.box = readFileViewerBox();
+    fileSidebar.maxed = readFileViewerMaxed();
     fileSidebar.closeFile = stage.querySelector("#fileCloseFile");
     fileSidebar.closeFile.addEventListener("click", () => closeFileViewer());
     // 铅笔 / 存 / 放弃 三颗：改一个文件那一摊都在这一块（见 startFileEdit / saveFileEdit）
@@ -9710,6 +9767,7 @@
     wireDirSwipe();
     root.querySelector("#fileClose").addEventListener("click", () => setFileSidebarOpen(false));
     root.querySelector("#fileSearchBtn").addEventListener("click", () => openFileSearch());
+    stage.querySelector("#fileMax").addEventListener("click", () => toggleFileViewerMax());
     fileSidebar.fontMinus.addEventListener("click", () => stepFileViewerFont(-1));
     fileSidebar.fontPlus.addEventListener("click", () => stepFileViewerFont(1));
     applyFileViewerFont();
