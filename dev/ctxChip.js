@@ -24,8 +24,8 @@ const fake = (pct, act, tps) => `
     const top = document.getElementById("composer");
     el.querySelector(".ci-name").textContent = "deepseek-flash";
     top.style.setProperty("--ci-pct", ${JSON.stringify(pct)});
-    top.classList.toggle('ctx-warn', ${pct} >= 0.30 && ${pct} < 0.70);
-    top.classList.toggle('ctx-err', ${pct} >= 0.70);
+    top.classList.toggle('ctx-warn', ${pct} >= 0.60 && ${pct} < 0.80);
+    top.classList.toggle('ctx-err', ${pct} >= 0.80);
     document.getElementById("ctxAct").dataset.act = ${JSON.stringify(act)};
     document.getElementById("ctxTps").textContent = ${JSON.stringify(tps)};
     return true;
@@ -118,7 +118,8 @@ module.exports = async (page) => {
 
     // 用真 stats 消息验证边界，而不是只手动改 class；不向模型发消息。
     const colors = new Map();
-    for (const percent of [0, 20, 29.9, 30, 50, 69.9, 70, 80, 100]) {
+    let grayTrack = '';
+    for (const percent of [0, 20, 59.9, 60, 70, 79.9, 80, 90, 100]) {
         await page.eval(`window.postMessage({type:'stats',contextUsage:{percent:${percent}}}, '*'); return true;`);
         await page.sleep(250);
         const state = await page.eval(`const c = document.getElementById('composer'); return {
@@ -126,18 +127,19 @@ module.exports = async (page) => {
             color:getComputedStyle(document.querySelector('#ctxBar .ct-fill')).backgroundColor,
             track:getComputedStyle(document.getElementById('ctxBar')).backgroundColor
         };`);
-        if (state.warn !== (percent >= 30 && percent < 70) || state.err !== (percent >= 70)) {
+        if (state.warn !== (percent >= 60 && percent < 80) || state.err !== (percent >= 80)) {
             throw new Error('用量分段不对：' + percent + '% ' + JSON.stringify(state));
         }
-        if (state.track !== 'rgb(17, 17, 17)') { throw new Error('横杠底色不是黑色：' + state.track); }
-        const stage = percent < 30 ? 'green' : percent < 70 ? 'yellow' : 'red';
+        if (!grayTrack) { grayTrack = state.track; }
+        if (state.track !== grayTrack || ['rgb(0, 0, 0)', 'rgb(17, 17, 17)'].includes(state.track)) { throw new Error('灰底发生变化或仍是纯黑：' + state.track); }
+        const stage = percent < 60 ? 'green' : percent < 80 ? 'yellow' : 'red';
         if (colors.has(stage) && colors.get(stage) !== state.color) { throw new Error('同一段颜色不一致'); }
         colors.set(stage, state.color);
-        if ([20, 50, 80].includes(percent)) { await shot(page, `ctx-color-${stage}.png`, 3); }
+        if ([20, 70, 90].includes(percent)) { await shot(page, `ctx-color-${stage}.png`, 3); }
     }
     if (new Set(colors.values()).size !== 3) { throw new Error('三段颜色没有区分'); }
     await page.eval(`document.getElementById('input').focus(); document.getElementById('composer').classList.add('auto'); return true;`);
     const track = await page.eval(`return getComputedStyle(document.getElementById('ctxBar')).backgroundColor;`);
-    if (track !== 'rgb(17, 17, 17)') { throw new Error('焦点或自动模式改变了黑底'); }
-    console.log('绿 / 黄 / 红边界及黑底：全部通过', Object.fromEntries(colors));
+    if (track !== grayTrack) { throw new Error('焦点或自动模式改变了灰底'); }
+    console.log('绿 / 黄 / 红边界及灰底：全部通过', grayTrack, Object.fromEntries(colors));
 };

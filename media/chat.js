@@ -5020,9 +5020,9 @@
     // 有图的时候横杠左头那一格也靠它挖掉 —— 见 chat.css 里那条 :has()）
     if (ctxActEl) { ctxActEl.dataset.act = shown; }
     if (composerEl) {
-      composerEl.classList.toggle("ctx-warn", pct >= 30 && pct < 70);
-      composerEl.classList.toggle("ctx-err", pct >= 70);
-      // 用量：0~1 的一个数写进 --ci-pct，黑色底上的绿 / 黄 / 红色填充按它计量（见 chat.css）。
+      composerEl.classList.toggle("ctx-warn", pct >= 60 && pct < 80);
+      composerEl.classList.toggle("ctx-err", pct >= 80);
+      // 用量：0~1 的一个数写进 --ci-pct，灰色底上的绿 / 黄 / 红色填充按它计量（见 chat.css）。
       // 还没量出来（没配模型 / 还没报过用量）就空着。精确的百分比在悬浮提示里（见 ctxTitle）。
       const known = (state === "idle" || state === "streaming") && typeof st.percent === "number";
       composerEl.style.setProperty("--ci-pct", known ? (pct / 100).toFixed(4) : "0");
