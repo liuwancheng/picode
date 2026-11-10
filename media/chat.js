@@ -4763,6 +4763,32 @@
     if (composer) { composer.classList.toggle("auto", !!auto); }
   }
 
+  // ==================== 发送键（输入框右下角）====================
+  // 电脑上是回车发送（见 isSendKey），可手机上没有回車：输入法那颗回車不一定发得出去
+  // （发送键还能被设成 Ctrl+Enter，那就更没法发）。所以给一颗真能点的发送键。
+  // 没有字、没有附件时灰着（跟 send() 那一段空判断一个口径）。
+  let sendBtn = null;
+  (function buildSendButton() {
+    const row = document.getElementById("inputRow");
+    if (!row) { return; }
+    sendBtn = document.createElement("button");
+    sendBtn.type = "button";
+    sendBtn.id = "sendBtn";
+    sendBtn.title = "发送";
+    sendBtn.setAttribute("aria-label", "发送");
+    sendBtn.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true">'
+      + '<path d="M8 13V3.5M4.2 7.3 8 3.5l3.8 3.8" fill="none" stroke="currentColor"'
+      + ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    // 摆在横排最右头（自动模式开关右边）
+    row.appendChild(sendBtn);
+    // 手指按下去别把键盘收了：收了以后还想接着打就得再点一下输入框
+    sendBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); });
+    sendBtn.addEventListener("click", () => {
+      if (sendBtn.disabled) { return; }
+      send();
+    });
+  })();
+
   let queueActionSeq = 0;
   function requestQueueAction(st, kind, index, text, act, revision, replacement) {
     if (st.queueAction || !st.queueEditable) { return; }
@@ -4936,6 +4962,14 @@
     const st = activeSession();
     // 一个会话都没有时那颗「+」不给点：新会话总得开在某个工作区里，先在「项目与会话」里挑一个
     if (newSessionBtn) { newSessionBtn.disabled = !st; }
+    // 发送键：会话就绪而且真有点东西要发才给按（跟 send() 第一段那个空判断一个口径）。
+    // 会话还没起来那两秒也不给按 —— 那时候按下去只会把字记成“就绪后自动发”。
+    if (sendBtn) {
+      const d = draftOfSession();
+      const hasBody = !!inputEl.value.trim()
+        || (d.images || []).length > 0 || (d.textBlocks || []).length > 0;
+      sendBtn.disabled = !st || !st.piReady || !hasBody;
+    }
     syncNoSessionHint();
     syncEndHint(st);
   }
@@ -5144,7 +5178,8 @@
   }
 
   function updateSendState() {
-    // VSCode 里发送/中止只看键盘（Enter 发送、Esc 中止），没有按钮；状态文案由 syncStatus 负责。
+    // VSCode 里发送靠回车、中止靠 Esc，那颗发送键只是给手机（和不想记快捷键的人）留的；
+    // 能不能按（没字就灰着）跟按钮别的状态一起在 syncComposerButtons 里算。
     // 网页端（尤其手机）没有 Esc：消息流末尾那一行闲着是「继续」、生成中是「卡住了」加一颗
     // 只有方块的「停止生成」（见 syncEndHint）。
     syncComposerButtons();
@@ -12224,7 +12259,7 @@
     }
     if (isSendKey(e)) { e.preventDefault(); send(); }
   });
-  inputEl.addEventListener("input", () => { autoResize(); maybeShowFileMenu(); maybeShowHashMenu(); maybeShowSlashMenu(); });
+  inputEl.addEventListener("input", () => { autoResize(); maybeShowFileMenu(); maybeShowHashMenu(); maybeShowSlashMenu(); updateSendState(); });
   inputEl.addEventListener("blur", () => { setTimeout(() => { hideFileMenu(); hideHashMenu(); closeSlashMenu(); fileMenuEl.classList.add("hidden"); }, 150); });
   inputEl.addEventListener("paste", (e) => {
     if (!activeSession()) { return; }

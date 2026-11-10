@@ -638,8 +638,21 @@
   /* 一个会话都没有时那颗加号灰掉（新会话总得开在某个工作区里，先去面板里挑一个） */
   #newSessionBtn:disabled { opacity: 0.4; cursor: default; }
   #newSessionBtn:disabled:hover { background: transparent; color: var(--vscode-descriptionForeground, inherit); }
-  /* 「截图」靠着右头：中间空出来的地方就是留白，所以那个 margin-left: auto 挂在它身上。 */
-  #browserScreenshotBtn { margin-left: auto; }
+  /* 「截图」靠着右头：中间空出来的地方就是留白（那个 margin-left: auto 现在挂在发送键上，
+     它在所有环境里都有，靠它把右边那几颗一起推到最右）。 */
+  /* 发送键：框底横排最右头一颗实心圆钮。手机上没有回车可用（输入法那颗回车不一定发得出去，
+     发送键还可能被设成 Ctrl+Enter），就靠它。颜色用前景/背景这对，所以浅色主题里是黑底白箭头、
+     深色主题反过来；没字的时候淡下去。 */
+  #sendBtn {
+    flex: 0 0 auto; width: 26px; height: 26px; margin-left: auto; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--vscode-foreground); color: var(--vscode-editor-background);
+    border: none; border-radius: 50%; cursor: pointer;
+  }
+  #sendBtn svg { width: 15px; height: 15px; display: block; }
+  #sendBtn:hover:not(:disabled) { opacity: 0.85; }
+  #sendBtn:disabled { background: var(--vscode-descriptionForeground, #999); opacity: 0.3; cursor: default; }
+  #sendBtn:disabled:active { transform: none; }
   /* 打字的地方：框里剩下多少地方全是它的（宽度沾满，高度自己按内容长，见 autoResize）。
      这里不能写 flex: 1 —— 盒子是竖排，flex-basis: 0 会把 height 顶掉，
      打字一多就长不高了（框里自己滚）。 */
