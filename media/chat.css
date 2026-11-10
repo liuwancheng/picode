@@ -570,8 +570,8 @@
     border-radius: 14px; padding: 6px 6px 3px;
     transition: border-color 200ms;
   }
-  /* 顶边那条的横杠跟着边框一起换色（--ctx-track）—— 点进去是焦点色、自动模式开着是绿。 */
-  #composer:focus-within { border-color: var(--vscode-focusBorder); border-top-color: transparent; --ctx-track: var(--vscode-focusBorder); }
+  /* 焦点只改输入框边框，用量横杠保持黑底与自己的分段颜色。 */
+  #composer:focus-within { border-color: var(--vscode-focusBorder); border-top-color: transparent; }
   /* 自动模式开着的时候：输入框外面那圈边框直接变绿（一根绿边），一眼看出它在自己跑。
      以前这里跑一道流光（一道亮光顺着边转一圈），先在手机上换成绿边，现在电脑上也一样了，
      两头只剩这根绿边，没有动画。
@@ -580,7 +580,7 @@
      放着它主线程 13.3% 忙（每秒算样式 60 次），不放 0.01%。而且它跟“在不在跑”无关，
      自动模式一开着就在跑，是查到的单项最贵的一项。
      量法：node dev/perfProbe.js --auto --cpu 4。 */
-  #composer.auto { border-color: var(--vscode-charts-green, #3fb950); border-top-color: transparent; --ctx-track: var(--vscode-charts-green, #3fb950); }
+  #composer.auto { border-color: var(--vscode-charts-green, #3fb950); border-top-color: transparent; }
   #inputRow { display: flex; align-items: center; gap: 2px; }
   /* 框底那条横排左头那颗加号（新建会话）、右头那颗「截图」、再往右的自动模式按钮：
      一样的矮方块，鼠标扫过亮一下。中间是模型胶囊（见下面的 #ctxIcon）。 */
@@ -1472,7 +1472,7 @@
      横杠是弹性的（吃掉中间剩下的位置）：有图 / 有速度的时候它短一点，两样都没有的时候铺满整条，
      看着就是盒子的一条边框。盒子自己的顶边框调成透明，让这一条顶上来当边框；
      左右两头各留 13px 给圆角。 */
-  #composer { border-top-color: transparent; --ctx-track: var(--vscode-input-border, rgba(128,128,128,0.35)); }
+  #composer { border-top-color: transparent; }
   #ctxTop {
     position: absolute; top: -1px; left: 13px; right: 13px; height: 2px;
     display: flex; align-items: center; gap: 6px; pointer-events: none;
@@ -1481,22 +1481,21 @@
   #ctxTop .ct-cell { position: relative; flex: 0 0 auto; width: 12px; height: 12px; display: none; }
   #ctxTop .ct-cell:has(.ct-act[data-act]:not([data-act=""])) { display: block; }
   #ctxTop .ct-act { position: absolute; inset: 0; }
-  /* 用量横杠：空槽（取输入框边框那个颜色）+ 里面那截填充。填多满由 --ci-pct 给
+  /* 用量横杠：黑色空槽 + 绿 / 黄 / 红填充。填多满由 --ci-pct 给
      （chat.js 每次算完用量就写一回，0~1 的一个数，写在 #composer 上）。 */
   #ctxTop #ctxBar {
     flex: 1 1 auto; min-width: 0; position: relative; height: 2px; border-radius: 1px;
-    background: var(--ctx-track, var(--vscode-input-border, rgba(128,128,128,0.35)));
+    background: #111;
   }
   #ctxTop #ctxBar .ct-fill {
     position: absolute; left: 0; top: 0; bottom: 0; border-radius: 1px;
     width: calc(100% * var(--ci-pct, 0));
-    /* 填进来的那截：跟字一样的前景色压七成（浅色主题下是一条深灰、深色主题下是一条浅灰） */
-    background: color-mix(in srgb, var(--vscode-foreground, #444) 70%, transparent);
+    /* <30% 绿；30%～不足70% 黄；≥70% 红。颜色不随焦点和自动模式变化。 */
+    background: var(--vscode-charts-green, #22c55e);
     transition: width 200ms ease;
   }
-  /* 用量 ≥70% 黄、≥90% 红（跟以前一样） */
-  #composer.ctx-warn #ctxBar .ct-fill { background: var(--vscode-editorWarning-foreground, #cca700); }
-  #composer.ctx-err #ctxBar .ct-fill { background: var(--vscode-errorForeground, #f14c4c); }
+  #composer.ctx-warn #ctxBar .ct-fill { background: var(--vscode-editorWarning-foreground, #eab308); }
+  #composer.ctx-err #ctxBar .ct-fill { background: var(--vscode-errorForeground, #ef4444); }
   /* 这一轮的生成速度：写在右头（不跑就整格收掉，横杠就铺到右头）。
      宽度跟着字走 —— 跟横杠之间只隔那 6px，不会空出一截。
      数字之间不会因此抖：`tabular-nums` 让每个数字一样宽，只有位数真变了（9.8 → 116.5）
