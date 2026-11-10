@@ -55,6 +55,8 @@ export interface PiConfig {
      * 空串或缺省表示那份清单一直取不到（那颗按钮会写着还没取到）。
      */
     envExtension?: string;
+    /** 安全逐条原位修改/取消排队消息的 pi 桥；私有队列结构能力检查失败时关闭操作。 */
+    queueExtension?: string;
 }
 
 /**

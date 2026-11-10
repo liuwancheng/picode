@@ -598,6 +598,7 @@ export abstract class ChatControllerBase implements RuntimeHost {
         if (cfg.bashExtension) { extraArgs.push("-e", cfg.bashExtension); }
         // 报「加载了什么」（工具 / 技能 / MCP）：同上，每个会话都带
         if (cfg.envExtension) { extraArgs.push("-e", cfg.envExtension); }
+        if (cfg.queueExtension) { extraArgs.push("-e", cfg.queueExtension); }
         const client = new PiClient({
             piPath: cfg.piPath,
             cwd: this.getCwd(),
@@ -2421,6 +2422,26 @@ export abstract class ChatControllerBase implements RuntimeHost {
                     });
                 }
                 return;
+            case "queueAction": {
+                // 必须明确 sessionId，不能借 tabId 或当前会话回落；只给发起操作的页面回话。
+                const clientId = this.currentPageId;
+                const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
+                const runtime = sessionId ? this.panels.get(sessionId) : undefined;
+                const reply = (result: Record<string, unknown>) => this.postToOneClient(clientId, {
+                    ...result, type: "queueActionResult", sessionId,
+                    requestId: typeof msg.requestId === "string" ? msg.requestId : "",
+                    act: msg.act === "edit" ? "edit" : "cancel",
+                });
+                if (!runtime) {
+                    reply({ requestId: msg.requestId, act: msg.act, success: false, error: "请指定仍然打开的会话" });
+                } else {
+                    void runtime.queueAction(msg).then(result => reply({ ...result })).catch(error => {
+                        reply({ requestId: msg.requestId, act: msg.act, success: false,
+                            error: error instanceof Error ? error.message : "逐条排队操作失败" });
+                    });
+                }
+                return;
+            }
             case "bashTasks": {
                 // 界面要一份后台命令清单：消息流末尾那一块（「后台任务」）照它画哪几条还在跑。
                 // 只回问的那块屏；清单跟着会话的内存走，会话关了就没了。

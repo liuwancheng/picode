@@ -24,7 +24,7 @@ import { ChatControllerBase, type ViewOptionItem, type WorkspacePage } from "./c
 import { ServerStateStore } from "./serverState";
 import { DEFAULT_SERVER_CONFIG, readServerConfig, updateServerConfig, type ServerConfig } from "./serverConfig";
 import { isOwnPage, pushRemoteNotice, REMOTE_TEXT_CHARS, type RemoteNotice } from "./remoteNotice";
-import { getAskAssets, getBashAssets, getEnvAssets, getImageAssets, getTabaAssets, getTitleAssets } from "./bridgeAssets";
+import { getAskAssets, getBashAssets, getEnvAssets, getImageAssets, getTabaAssets, getTitleAssets, getQueueAssets } from "./bridgeAssets";
 import { serverConfigFile, serverStateFile } from "./serverPaths";
 import {
     dropSessionFileLists,
@@ -279,6 +279,7 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         const image = getImageAssets();
         const bash = getBashAssets();
         const env = getEnvAssets();
+        const queue = getQueueAssets();
         return {
             // 这三样不让人配了：pi 走 PATH、永远信任项目（启动时带 --approve）、没有额外参数。
             // PICHAT_PI 只给调试用（dev/harness.js 指到假 pi），不给就是 PATH 里的 pi。
@@ -303,6 +304,7 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             bashDir: bash?.ok ? path.join(bash.resourceDir, "bash") : "",
             // 把「加载了什么」（工具 / 技能 / MCP）报回来：每个会话都带
             envExtension: env?.ok ? env.extensionPath : "",
+            queueExtension: queue?.ok ? queue.extensionPath : "",
         };
     }
 

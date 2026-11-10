@@ -1,4 +1,7 @@
 import * as fs from "fs";
+import { randomUUID } from "crypto";
+import { QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, decodeQueueResult, isQueueActionRequest,
+    type QueueActionResult } from "./queueBridgeSource";
 import { PiClient } from "./piClient";
 import { ASK_DECODER, AskDoneNotice, AskRequest } from "./askProtocol";
 import { BASH_DECODER, BashTaskEvent, BashTaskInfo } from "./bashProtocol";
@@ -110,7 +113,7 @@ function commandSourcePriority(source: string | undefined): number {
 export function commandMenuItems(commands: RpcCommandInfo[]): SlashCommandItem[] {
     const picked = new Map<string, RpcCommandInfo>();
     for (const c of commands) {
-        if (!c || typeof c.name !== "string" || !c.name) { continue; }
+        if (!c || typeof c.name !== "string" || !c.name || c.name.startsWith(QUEUE_REMOVE_COMMAND)) { continue; }
         const name = c.name.startsWith("skill:") ? c.name.slice("skill:".length) : c.name;
         if (!name) { continue; }
         const prev = picked.get(name);
@@ -237,6 +240,10 @@ export class SessionRuntime {
      *  回来就还照着旧的样子写着“在排队”，实际上早就发出去了。 */
     private queuedSteering: string[] = [];
     private queuedFollowUp: string[] = [];
+    private queueRevision = 0;
+    private queueEditable = false;
+    private queueNativeSessionId = "";
+    private readonly queueResults = new Map<string, (result: QueueActionResult) => void>();
 
     /** 当前 panel 是否尚未承载会话内容，且不在加载过程中。 */
     public isConversationEmpty(): boolean {
@@ -433,6 +440,7 @@ export class SessionRuntime {
         if (cfg.bashExtension) { extraArgs.push("-e", cfg.bashExtension); }
         // “加载了什么”（工具 / 技能 / MCP）：每个会话都带，界面那颗「工具」看的就是它报上来的
         if (cfg.envExtension) { extraArgs.push("-e", cfg.envExtension); }
+        if (cfg.queueExtension) { extraArgs.push("-e", cfg.queueExtension); }
         if (this.launch?.extraArgs && this.launch.extraArgs.length > 0) {
             extraArgs.push(...this.launch.extraArgs);
         }
@@ -504,6 +512,9 @@ export class SessionRuntime {
             this.post({ type: "systemError", text: `pi 错误: ${err.message}` });
         });
         this.client.on("exit", (code: number | null) => {
+            this.failQueueActions("pi 进程已退出");
+            this.queueEditable = false;
+            this.post(this.queueSnapshot());
             this.streaming = false;
             // 进程没了，等着的那一下“停稳”就不会再来了：那句“卡住了”作废
             //（留着的话，用户下一轮跑完时它会莫名其妙冒出来）。
@@ -538,6 +549,8 @@ export class SessionRuntime {
     }
 
     public stopClient(): void {
+        this.failQueueActions("会话已经关闭");
+        this.queueEditable = false;
         if (this.client) {
             this.client.stop();
             this.client = undefined;
@@ -581,6 +594,13 @@ export class SessionRuntime {
 
     /** 会话被换掉：旧标题作废。 */
     private noteSessionReplaced(): void {
+        this.failQueueActions("会话已经切换，请刷新后重试");
+        this.queuedSteering = [];
+        this.queuedFollowUp = [];
+        this.queueRevision = 0;
+        this.queueEditable = false;
+        this.queueNativeSessionId = "";
+        this.post(this.queueSnapshot());
         this.piSessionTitle = "";
         // 后台命令清单也跟着会话走：换会话 / 换进程以后旧的那些都不认了
         this.bashTasks.clear();
@@ -588,6 +608,68 @@ export class SessionRuntime {
         this.bashRunningShown = false;
         // 「加载了什么」同理：新进程会重新报一份
         this.envSnapshot = undefined;
+    }
+
+    // ---- 逐条排队操作 ----
+
+    private queueSnapshot(): Record<string, unknown> {
+        return { type: "queueUpdate", steering: this.queuedSteering.slice(), followUp: this.queuedFollowUp.slice(),
+            revision: this.queueRevision, editable: this.queueEditable };
+    }
+
+    private failQueueActions(error: string): void {
+        for (const [requestId, finish] of this.queueResults) {
+            finish({ requestId, act: "cancel", success: false, error });
+        }
+    }
+
+    /** 内部扩展命令先于 busy 判断执行；edit 原位替换、cancel 删单条，不经过 handleSend。
+     *  双队列 mutation 后的 queue_update 同步本地摘要，不清空或重发队列。 */
+    public async queueAction(value: unknown): Promise<QueueActionResult> {
+        const input = value as any;
+        const fail = (error: string): QueueActionResult => ({ requestId: typeof input?.requestId === "string" ? input.requestId : "",
+            act: input?.act === "edit" ? "edit" : "cancel", success: false, error });
+        if (!isQueueActionRequest(input)) { return fail("排队操作参数无效"); }
+        const client = this.client;
+        const nativeSessionId = this.queueNativeSessionId;
+        if (!client?.isRunning() || this.loading || !this.queueEditable || !nativeSessionId) {
+            return fail("当前会话不支持逐条排队操作");
+        }
+        const fresh = () => this.client === client && client.isRunning() && !this.loading && this.queueEditable
+            && this.queueNativeSessionId === nativeSessionId && this.queueRevision === input.revision;
+        const texts = input.kind === "steering" ? this.queuedSteering : this.queuedFollowUp;
+        if (!fresh() || texts[input.index] !== input.text) { return fail("排队消息已经变化，请按最新队列重试"); }
+        // 当前命令须真由扩展提供，不能把未知 / 命令作为普通提问交给模型。
+        const commands = await client.request<{ commands: RpcCommandInfo[] }>({ type: "get_commands" }, 5000);
+        if (!fresh()) { return fail("排队消息或会话已经变化，请按最新队列重试"); }
+        if (!Array.isArray(commands?.data?.commands) || !commands.data.commands.some(command =>
+            command?.name === QUEUE_REMOVE_COMMAND && command.source === "extension")) {
+            return fail("逐条排队操作桥未加载，请重开会话");
+        }
+        // 页面 requestId 可能重复；用独立桥编号隔离窗口，回页面时换回原编号。
+        const bridgeId = randomUUID();
+        let finish!: (result: QueueActionResult) => void;
+        const result = new Promise<QueueActionResult>(resolve => {
+            const timer = setTimeout(() => finish({ requestId: bridgeId, act: input.act, success: false,
+                error: "排队操作未收到 pi 确认，请刷新队列后重试" }), 8000);
+            finish = reply => {
+                clearTimeout(timer);
+                this.queueResults.delete(bridgeId);
+                resolve({ ...reply, requestId: input.requestId, act: input.act });
+            };
+            this.queueResults.set(bridgeId, finish);
+        });
+        const payload = Buffer.from(JSON.stringify({ requestId: bridgeId, act: input.act, kind: input.kind,
+            index: input.index, text: input.text, revision: input.revision, nativeSessionId,
+            ...(input.act === "edit" ? { replacement: input.replacement } : {}) }), "utf8").toString("base64");
+        const response = await client.request<{ disposition?: string }>({ type: "prompt",
+            message: "/" + QUEUE_REMOVE_COMMAND + " " + payload }, 5000);
+        // prompt handled 仅表示命令执行过，不能把扩展内部失败当成功；成功必须由专用 notify 确认。
+        if (!response?.success || response.data?.disposition !== "handled") {
+            finish({ requestId: bridgeId, act: input.act, success: false,
+                error: response?.error || "排队操作命令未被 pi 确认" });
+        }
+        return result;
     }
 
     // ---- 后台命令（那个接管了 bash 的扩展报上来的）----
@@ -974,11 +1056,10 @@ export class SessionRuntime {
                 // steering/followUp 队列变化（steer 排队/投递/abort 后清空）
                 this.queuedSteering = Array.isArray(evt.steering) ? evt.steering.slice() : [];
                 this.queuedFollowUp = Array.isArray(evt.followUp) ? evt.followUp.slice() : [];
-                this.post({
-                    type: "queueUpdate",
-                    steering: this.queuedSteering.slice(),
-                    followUp: this.queuedFollowUp.slice(),
-                });
+                this.queueRevision = Number.isSafeInteger(evt.queueRevision) && evt.queueRevision >= 0 ? evt.queueRevision : 0;
+                this.queueNativeSessionId = typeof evt.queueSessionId === "string" ? evt.queueSessionId : "";
+                this.queueEditable = evt.queueEditable === true && this.queueRevision > 0 && !!this.queueNativeSessionId;
+                this.post(this.queueSnapshot());
                 break;
             case "message_start": {
                 // pi 推送 user 消息开始（含 steer 投递的排队消息）：统一在此渲染 user 气泡，
@@ -1178,6 +1259,11 @@ export class SessionRuntime {
                 }
                 break;
             case "extension_error":
+                if (evt.extensionPath === "command:" + QUEUE_REMOVE_COMMAND && this.queueResults.size === 1) {
+                    // 没有桥编号的异常事件只在唯一在途请求时认领，不能误报另一个窗口的操作失败。
+                    this.failQueueActions(String(evt.error ?? "逐条排队操作失败"));
+                    break;
+                }
                 this.post({
                     type: "systemError",
                     text: `扩展错误${evt.extensionPath ? ` (${evt.extensionPath})` : ""}`
@@ -1257,6 +1343,11 @@ export class SessionRuntime {
     }
 
     private onPiUiRequest(req: any): void {
+        if (req.method === "notify" && typeof req.message === "string" && req.message.startsWith(QUEUE_RESULT_PREFIX)) {
+            const result = decodeQueueResult(req.message);
+            if (result) { this.queueResults.get(result.requestId)?.(result); }
+            return; // 内部协议不变成系统消息，也不交给模型
+        }
         const respond = (payload: Record<string, unknown>) => {
             if (this.client && this.client.isRunning()) {
                 this.client.send({ type: "extension_ui_response", id: req.id, ...payload });
@@ -1441,7 +1532,7 @@ export class SessionRuntime {
         emit({ type: "piReady", ready: this.piReady });
         // 排队里的那几条也补一份现在的真相：重画只重放消息，排队不是消息，界面上那一块
         // 只能靠这一条对齐（空的也要发，不然它还照着断线前收到的旧样子显示“在排队”）。
-        emit({ type: "queueUpdate", steering: this.queuedSteering.slice(), followUp: this.queuedFollowUp.slice() });
+        emit(this.queueSnapshot());
         if (!this.client || !this.client.isRunning()) {
             emit({
                 type: "system",

@@ -54,6 +54,8 @@
     child: '<svg width="14" height="14" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 1.6V8.4H12.6"/><path d="M9.8 5.6L12.8 8.4L9.8 11.2"/></svg>',
     // 一支铅笔：看文件的弹窗横条上那颗「改一下这个文件」。
     edit: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.2 2.1a1.3 1.3 0 0 1 1.8 0l1 1a1.3 1.3 0 0 1 0 1.8l-7.7 7.7-3.9.9.9-3.9z"/><path d="M9.9 3.4l2.8 2.8"/></svg>',
+    // 排队消息行尾的垃圾桶：取消尚未投递的这一条。
+    trash: '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.6 9.5h6.8L12 4M6.5 6.5v4.5M9.5 6.5v4.5"/></svg>',
     // 一张软盘：编辑时横条上那颗「存」。
     save: '<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M2.4 2.9a.5.5 0 0 1 .5-.5h8.2l2.5 2.5v8.2a.5.5 0 0 1-.5.5H2.9a.5.5 0 0 1-.5-.5z"/><path d="M5 2.4h5.3v3.3H5z"/><path d="M4.7 8.6h6.6v4.5H4.7z"/></svg>',
     // 往右的箭头：消息流末尾那条「继续」上用（VSCode 官方 codicon 的 arrow-right）
@@ -1028,6 +1030,11 @@
       // seen：已经记过的调用编号（同一条重放一遍不再算）。
       toolStats: { calls: 0, totalMs: 0, byTool: new Map(), slowest: [], seen: new Set() },
       queuedSteering: [],
+      queuedFollowUp: [],
+      queueRevision: 0,
+      queueEditable: false,
+      queueAction: null,
+      queueEdit: null,
       pendingSteerRestore: null,
       autoLoadHinted: false,
     };
@@ -4665,23 +4672,121 @@
     if (composer) { composer.classList.toggle("auto", !!auto); }
   }
 
+  let queueActionSeq = 0;
+  function requestQueueAction(st, kind, index, text, act, revision, replacement) {
+    if (st.queueAction || !st.queueEditable) { return; }
+    const requestId = "queue-" + Date.now() + "-" + (++queueActionSeq);
+    st.queueAction = { requestId, act };
+    renderQueueBar(st);
+    vscode.postMessage({ type: "queueAction", sessionId: st.id, requestId, act,
+      kind, index, text, revision, ...(act === "edit" ? { replacement } : {}) });
+  }
+
+  function finishQueueAction(st, msg) {
+    const pending = st.queueAction;
+    if (!pending || pending.requestId !== msg.requestId) { return; }
+    st.queueAction = null;
+    if (msg.success !== true) {
+      const error = msg.error || "排队消息操作失败，请按最新队列重试。";
+      if (st.queueEdit) { st.queueEdit.error = error; }
+      else { addPlain(st, "system error", null, error); }
+    } else if (pending.act === "edit") {
+      st.queueEdit = null;
+    }
+    renderQueueBar(st);
+  }
+
   function renderQueueBar(st) {
     if (activeId !== st.id) { return; }
-    const items = st.queuedSteering || [];
+    const items = [
+      ...(st.queuedSteering || []).map((text, index) => ({ text, index, kind: "steering" })),
+      ...(st.queuedFollowUp || []).map((text, index) => ({ text, index, kind: "followUp" })),
+    ];
+    const edit = st.queueEdit;
+    const focused = document.activeElement?.classList.contains("qb-edit-input");
+    const selection = focused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+    if (edit) {
+      let at = items.findIndex(item => item.kind === edit.kind && item.index === edit.index && item.text === edit.text);
+      // 原消息若已投递，仍保留行内文字供复制；绝不把它自动重新发送。
+      if (at < 0) {
+        at = Math.min(items.length, edit.index + (edit.kind === "followUp" ? st.queuedSteering.length : 0));
+        items.splice(at, 0, { text: edit.text, index: edit.index, kind: edit.kind });
+      }
+      items[at].editing = true;
+    }
     if (!items.length) { queueBarEl.classList.add("hidden"); queueBarEl.innerHTML = ""; return; }
     queueBarEl.classList.remove("hidden");
     queueBarEl.innerHTML = "";
-    items.forEach((text) => {
+    const revision = st.queueRevision;
+    items.forEach(({ text, index, kind, editing }) => {
       const full = typeof text === "string" ? text : "";
       const lines = full.split("\n");
       const preview = lines.slice(0, 3).join("\n") + (lines.length > 3 ? "\n…" : "");
       const card = document.createElement("div");
       card.className = "qb-block collapsed";
-      const head = document.createElement("div");
+      card.dataset.kind = kind;
+      card.dataset.index = String(index);
+      const row = document.createElement("div");
+      row.className = "qb-row";
+      if (editing) {
+        card.classList.add("editing");
+        const stale = edit.revision !== revision || !st.queueEditable;
+        const area = document.createElement("textarea");
+        area.className = "qb-edit-input";
+        area.rows = 1;
+        area.wrap = "off";
+        area.value = edit.value;
+        area.readOnly = !!st.queueAction;
+        area.setAttribute("aria-label", "修改排队消息");
+        area.title = "保存前原消息仍在排队；Enter 保存，Shift+Enter 换行，Esc 放弃。";
+        const actions = document.createElement("div");
+        actions.className = "qb-actions";
+        const save = document.createElement("button");
+        save.type = "button";
+        save.className = "qb-action qb-save";
+        save.title = "保存修改";
+        save.setAttribute("aria-label", save.title);
+        save.innerHTML = ICONS.check;
+        save.disabled = !!st.queueAction || stale || !edit.value.trim();
+        save.addEventListener("click", () => {
+          if (save.disabled) { return; }
+          requestQueueAction(st, edit.kind, edit.index, edit.text, "edit", edit.revision, edit.value);
+        });
+        const discard = document.createElement("button");
+        discard.type = "button";
+        discard.className = "qb-action qb-discard";
+        discard.title = "放弃修改";
+        discard.setAttribute("aria-label", discard.title);
+        discard.innerHTML = ICONS["close-bold"];
+        discard.disabled = !!st.queueAction;
+        discard.addEventListener("click", () => { st.queueEdit = null; renderQueueBar(st); });
+        area.addEventListener("input", () => {
+          edit.value = area.value;
+          save.disabled = !!st.queueAction || stale || !edit.value.trim();
+        });
+        area.addEventListener("keydown", event => {
+          if (event.isComposing) { return; }
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); discard.click(); }
+          else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); save.click(); }
+        });
+        actions.append(save, discard);
+        row.append(area, actions);
+        card.appendChild(row);
+        const error = edit.error || (stale && !st.queueAction ? "队列已变化，无法保存此编辑；文字仍可复制，点 × 退出。" : "");
+        if (error) {
+          const note = document.createElement("div");
+          note.className = "qb-edit-error";
+          note.textContent = error;
+          card.appendChild(note);
+        }
+        queueBarEl.appendChild(card);
+        if (selection) { area.focus(); area.setSelectionRange(...selection); }
+        return;
+      }
+      const head = document.createElement("button");
+      head.type = "button";
       head.className = "qb-head";
-      head.title = "点击展开或收起排队消息";
-      head.setAttribute("role", "button");
-      head.setAttribute("tabindex", "0");
+      head.title = (kind === "followUp" ? "本轮结束后发送：" : "工具执行结束后发送：") + full;
       head.setAttribute("aria-expanded", "false");
       const dot = document.createElement("span"); dot.className = "qb-dot";
       const previewLine = document.createElement("span"); previewLine.className = "qb-preview";
@@ -4694,11 +4799,31 @@
         body.textContent = collapsed ? preview : full;
       };
       head.appendChild(dot); head.appendChild(previewLine);
-      card.appendChild(head); card.appendChild(body);
+      row.appendChild(head);
+      const actions = document.createElement("div");
+      actions.className = "qb-actions";
+      for (const act of ["edit", "cancel"]) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "qb-action qb-" + act;
+        const label = act === "edit" ? "修改这条排队消息" : "取消这条排队消息";
+        btn.title = st.queueEditable ? label : "当前 pi 不支持逐条队列操作";
+        btn.setAttribute("aria-label", label);
+        btn.innerHTML = act === "edit" ? ICONS.edit : ICONS.trash;
+        btn.disabled = !st.queueEditable || !!st.queueAction || !!st.queueEdit;
+        btn.addEventListener("click", () => {
+          if (btn.disabled || st.queueAction || st.queueEdit) { return; }
+          if (act === "cancel") { requestQueueAction(st, kind, index, full, act, revision); return; }
+          st.queueEdit = { kind, index, text: full, value: full, revision };
+          renderQueueBar(st);
+          const area = queueBarEl.querySelector(".qb-edit-input");
+          if (area) { area.focus(); area.select(); }
+        });
+        actions.appendChild(btn);
+      }
+      row.appendChild(actions);
+      card.appendChild(row); card.appendChild(body);
       head.addEventListener("click", toggle);
-      head.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); }
-      });
       queueBarEl.appendChild(card);
     });
   }
@@ -12452,8 +12577,14 @@
         if (activeId === t.id) { syncStatus(); }
         break;
       }
+      case "queueActionResult":
+        finishQueueAction(t, msg);
+        break;
       case "queueUpdate":
         t.queuedSteering = Array.isArray(msg.steering) ? msg.steering : [];
+        t.queuedFollowUp = Array.isArray(msg.followUp) ? msg.followUp : [];
+        t.queueRevision = typeof msg.revision === "number" ? msg.revision : 0;
+        t.queueEditable = msg.editable === true;
         // abort 后队列被清空：把未投递的 steer 文本合并写回输入框（与 TUI 一致）
         if (t.pendingSteerRestore && t.pendingSteerRestore.length && t.queuedSteering.length === 0) {
           const texts = t.pendingSteerRestore.filter((s) => typeof s === "string" && s);

@@ -529,14 +529,24 @@
   #queueBar:empty, #queueBar.hidden { display: none; }
   /* 目标条：输入框上头那一条「目标」的账（只在有目标时出现）。
      平时一行；展开是点开的正文（目标原文 + 验收清单）。 */
-  #queueBar .qb-block { overflow: hidden; }
-  #queueBar .qb-head { display: flex; align-items: center; gap: 6px; padding: 2px 0; border-radius: 3px; cursor: pointer; user-select: none; }
+  #queueBar .qb-block { overflow: hidden; border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); border-radius: 8px; background: var(--vscode-editorWidget-background, rgba(128,128,128,0.06)); }
+  #queueBar .qb-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 10px; }
+  #queueBar .qb-head { display: flex; align-items: center; flex: 1 1 auto; min-width: 0; gap: 8px; padding: 4px 0; border: 0; border-radius: 3px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; user-select: none; }
+  #queueBar .qb-actions { display: flex; flex: none; gap: 2px; }
+  #queueBar .qb-action { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--vscode-descriptionForeground, inherit); }
+  #queueBar .qb-action svg { display: block; flex: none; width: 16px; height: 16px; }
+  #queueBar .qb-action:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.15)); color: var(--vscode-foreground); }
+  #queueBar .qb-cancel:hover:not(:disabled) { color: var(--vscode-errorForeground, #ef4444); }
+  #queueBar .qb-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+  #queueBar .qb-edit-input { flex: 1 1 auto; min-width: 0; height: 28px; box-sizing: border-box; resize: none; margin: 0; padding: 2px 6px; font: inherit; line-height: 22px; white-space: pre; overflow: auto; background: var(--vscode-input-background); color: var(--vscode-input-foreground, inherit); border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.4)); border-radius: 4px; }
+  #queueBar .qb-edit-input:focus { outline: none; border-color: var(--vscode-focusBorder, #007acc); }
+  #queueBar .qb-edit-error { margin: 0 10px 6px; font-size: 0.85em; color: var(--vscode-errorForeground, #ef4444); }
   #queueBar .qb-head:hover { background: color-mix(in srgb, var(--vscode-list-hoverBackground, rgba(128,128,128,0.1)) 50%, transparent); }
   #queueBar .qb-head:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
   /* 排队那一条前头那颗点：一颗黄点，不呼吸（它是“这条排着”的记号，动不动都不多说什么）。 */
   #queueBar .qb-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--vscode-charts-yellow, #cca700); flex-shrink: 0; }
   #queueBar .qb-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground, inherit); }
-  #queueBar .qb-body { margin: 1px 0 3px 12px; padding: 0; font-family: inherit; font-size: 0.9em; white-space: pre-wrap; word-break: break-word; color: var(--vscode-foreground); max-height: 160px; overflow: auto; }
+  #queueBar .qb-body { margin: 2px 12px 8px; padding: 0; font-family: inherit; font-size: 0.9em; white-space: pre-wrap; word-break: break-word; color: var(--vscode-foreground); max-height: 160px; overflow: auto; }
   #queueBar .qb-block.collapsed .qb-body { display: none; }
   .img-thumb { position: relative; }
   .img-thumb img { height: 48px; border-radius: 4px; border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.4)); display: block; transition: transform 200ms; }

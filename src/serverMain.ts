@@ -22,7 +22,7 @@ import { displayName } from "./pageHtml";
 import { readServerConfig, updateServerConfig, seedPrompts } from "./serverConfig";
 import { clearServerAddress, findRunningServer, writeServerAddress } from "./serverState";
 import { startRestart } from "./serverRestart";
-import { ensureAskAssets, ensureImageAssets, ensureTabaAssets, ensureTitleAssets, ensureBashAssets, ensureEnvAssets } from "./bridgeAssets";
+import { ensureAskAssets, ensureImageAssets, ensureTabaAssets, ensureTitleAssets, ensureBashAssets, ensureEnvAssets, ensureQueueAssets } from "./bridgeAssets";
 import { serverConfigFile } from "./serverPaths";
 
 /** 界面资源目录（chat.js / chat.css 这些）：正常跑在仓库根下，单文件 exe 时是解出来的缓存目录。 */
@@ -203,6 +203,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<void
     const envAssets = ensureEnvAssets(VERSION);
     if (!envAssets.ok) {
         log(`「工具」那颗按钮会一直空着（文件没写成：${envAssets.error}）`);
+    }
+
+    const queueAssets = ensureQueueAssets(VERSION);
+    if (!queueAssets.ok) {
+        log(`逐条排队操作没开（文件没写成：${queueAssets.error}）`);
     }
 
     let started: StartedBackend;
