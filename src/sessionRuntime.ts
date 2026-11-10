@@ -4,12 +4,13 @@ import { QUEUE_REMOVE_COMMAND, QUEUE_RESULT_PREFIX, decodeQueueResult, encodeQue
     type QueueActionResult } from "./queueBridgeSource";
 import { PiClient } from "./piClient";
 import { ASK_DECODER, AskDoneNotice, AskRequest } from "./askProtocol";
-import { BASH_DECODER, BashTaskEvent, BashTaskInfo } from "./bashProtocol";
+import { BASH_DECODER, BashTaskEvent, BashTaskInfo, BASH_CLEAR_NOTICE_COMMAND, isBashNoticeMessage, bashNoticeMessageId } from "./bashProtocol";
 import { parseAutoCommand } from "./auto";
 import { StderrFrameSplitter } from "./piFrames";
 import { TABA_DECODER, TabaRequest } from "./tabaProtocol";
 import { ENV_DECODER, type EnvSnapshot } from "./envProtocol";
 import { NameParts } from "./names";
+import { isBusyPhase, sessionPhase, type SessionPhase } from "./sessionPhase";
 import { EditTracker } from "./editTracker";
 import { changeDiff as gitChangeDiff, listChanges, revertToHead, type SessionChanges } from "./gitChanges";
 import {
@@ -24,6 +25,7 @@ import {
     textOf,
     type ResultImageBlock,
 } from "./messageUtils";
+import { fitResultImages } from "./imageFit";
 import {
     type RpcCommandInfo,
     type RpcCompactionResult,
@@ -132,7 +134,7 @@ export function commandMenuItems(commands: RpcCommandInfo[]): SlashCommandItem[]
                 : "other",
         }))
         // 同名时别盖掉插件自己认下的那一条（/compact）；/auto 不再进菜单（开关改成按钮了）
-        .filter((it) => it.name !== BUILTIN_COMPACT_ITEM.name && it.name !== BUILTIN_AUTO_ITEM.name)
+        .filter((it) => it.name !== BUILTIN_COMPACT_ITEM.name && it.name !== BUILTIN_AUTO_ITEM.name && it.name !== BASH_CLEAR_NOTICE_COMMAND)
         .concat([BUILTIN_COMPACT_ITEM])
         .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -177,19 +179,24 @@ function estTokens(text: string): number {
 }
 
 /** 杀掉整棵进程树（界面上点「停」时用）。后台命令的进程是脱离出去的，按 pid 树收。 */
-function killTaskTree(pid: number): void {
-    if (!pid) { return; }
+function killTaskTree(pid: number): boolean {
+    if (!pid) { return false; }
     if (process.platform === "win32") {
         try {
-            require("node:child_process").spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
-        } catch { /* 进程可能已经没了 */ }
-        return;
+            return require("node:child_process").spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true }).status === 0;
+        } catch { return false; }
     }
     try {
         process.kill(-pid, "SIGKILL");
+        return true;
     } catch {
-        try { process.kill(pid, "SIGKILL"); } catch { /* 同上 */ }
+        try { process.kill(pid, "SIGKILL"); return true; } catch { return false; }
     }
+}
+
+/** 页面会显示的正文；自己的已填好通知也参与历史窗口计数。 */
+function isConversationMessage(message: any): boolean {
+    return !!message && (message.role === "user" || message.role === "assistant" || isBashNoticeMessage(message));
 }
 
 /**
@@ -220,6 +227,13 @@ export class SessionRuntime {
     public activity: RuntimeActivity = "idle";
     /** 当前阶段的附加信息，例如正在执行的工具名。 */
     public activityDetail = "";
+    /**
+     * 这一轮里正文正在流（模型刚吐过字、这条 assistant 消息还没完）：阶段里的“写”靠它。
+     * 只记一个字：真正的判定在 sessionPhase.ts（界面不再自己看正文有没有在流）。
+     */
+    private writingText = false;
+    /** 上一次推给界面的阶段：只有变了才推（见 postPhase）。 */
+    private phaseShown: SessionPhase = "idle";
     /** 这一轮正在写出来的字（agent_start 清空，每个 text_delta 往后接）。 */
     private streamingReply = "";
     public piReady = false;
@@ -251,6 +265,36 @@ export class SessionRuntime {
     /** 当前 panel 是否尚未承载会话内容，且不在加载过程中。 */
     public isConversationEmpty(): boolean {
         return !this.hasConversation && !this.loading;
+    }
+
+    /**
+     * 这个会话此刻处在哪个阶段：全应用只此一处算（见 sessionPhase.ts）。
+     * 界面只读这一个值，不再各挑几个字段自己拼。
+     */
+    public phase(): SessionPhase {
+        return sessionPhase({
+            hasSession: true,
+            piReady: this.piReady,
+            loading: this.loading,
+            hasModel: !!this.modelId,
+            compacting: this.compacting,
+            streaming: this.streaming,
+            activity: this.activity,
+            writing: this.writingText,
+        });
+    }
+
+    /**
+     * 阶段变了就推一条给界面（没变不推）。
+     *
+     * 只推“变了的”那一半：界面收到就存下，不做任何重新推断。会话列表里也带一份
+     * （断线重连、刷新页面之后靠它补回来，见 chatControllerBase 的 serializeSession）。
+     */
+    private postPhase(): void {
+        const phase = this.phase();
+        if (phase === this.phaseShown) { return; }
+        this.phaseShown = phase;
+        this.post({ type: "phaseChanged", phase, busy: isBusyPhase(phase) });
     }
 
     // ---- 当前状态快照（跟着 sessionList 发给界面，界面自己画输入框底下那颗胶囊）----
@@ -313,8 +357,6 @@ export class SessionRuntime {
      *
      *  想改回“带开头一小段”（点开就不用等那一下）把这个数调大就行，界面那一套两边都认。 */
     private static readonly DETAIL_PREVIEW_CHARS = 0;
-    /** 工具参数摘要里单个字段最多带多少字（够那行字用；整行还会再省略一次）。 */
-    private static readonly ARGS_SUMMARY_CHARS = 160;
     /** 裁下来的全文最多在内存里留多少（字符数）：超过就从最早留的开始丢（丢了的那段点开时取不到）。
      *  留得住长会话里最近几十轮就够：点开的是刚看到的那些，很久以前的点开时会说“取不到了”。 */
     private static readonly DETAIL_KEEP_CHARS = 4 * 1024 * 1024;
@@ -490,7 +532,7 @@ export class SessionRuntime {
                     continue;
                 }
                 if (frame.kind === "bash") {
-                    // 后台命令的开始 / 结束：记进这一会话的清单、推给界面；跑完的交给宿主去补一条消息
+                    // 这里只更新后台命令清单；模型通知由 pi 在交回前填入最新内容
                     this.noteBashTask(frame.value as BashTaskEvent);
                     continue;
                 }
@@ -519,6 +561,8 @@ export class SessionRuntime {
             this.queueEditable = false;
             this.post(this.queueSnapshot());
             this.streaming = false;
+            this.writingText = false;
+            this.postPhase();
             // 进程没了，等着的那一下“停稳”就不会再来了：那句“卡住了”作废
             //（留着的话，用户下一轮跑完时它会莫名其妙冒出来）。
             this.pendingAfterAbort = "";
@@ -530,6 +574,10 @@ export class SessionRuntime {
             this.post({ type: "streamEnd", activity: "idle" });
             this.setActivity("idle");
             this.setPiReady(true);
+            // 进程没了，这一轮也就到此为止：不会再有 agent_settled 了。
+            // 以前这里什么也不报，于是“这一轮结束了”这件事整个不会发生：不弹提醒、
+            // 子会话的结果交不回派活的会话、自动模式也永远等不到下一轮。
+            this.finishRoundOnExit();
             this.post({
                 type: "system",
                 text: `pi 进程已退出（code=${code}）。发送消息会自动重启。`,
@@ -595,6 +643,30 @@ export class SessionRuntime {
         return true;
     }
 
+    /**
+     * pi 进程没了，这一轮到这儿为止：不会再有 agent_settled 了。
+     *
+     * 按“出错”收尾（那之前点过中止的算取消），理由跟正常收尾一样：不报的话，这一轮
+     * 永远不算结束 —— 宿主不弹提醒、派出去的子会话结果交不回、自动模式等不到下一轮。
+     * 后台命令也跟着 pi 一起没了：清单还留着会让那颗点一直绿着（见 hasRunningBashTasks）。
+     */
+    private finishRoundOnExit(): void {
+        this.bashTasks.clear();
+        this.bashEnded.clear();
+        this.bashRunningShown = false;
+        // 让界面把末尾那一块「后台任务」也收掉（它只列还在跑的）
+        this.post({ type: "bashTasks", tasks: [] });
+        this.host.broadcastSessionList();
+        if (!this.runStarted) { return; }
+        const status: TurnEndStatus = this.abortRequested ? "cancelled" : "error";
+        this.runStarted = false;
+        this.abortRequested = false;
+        this.writingText = false;
+        this.postPhase();
+        // 进程没了，最后一条回复的原文取不到了（子会话交回的就是空的）
+        this.host.onTurnEnd({ panelId: this.id, status, lastReplyText: undefined });
+    }
+
     /** 会话被换掉：旧标题作废。 */
     private noteSessionReplaced(): void {
         this.failQueueActions("会话已经切换，请刷新后重试");
@@ -613,6 +685,15 @@ export class SessionRuntime {
         this.bashRunningShown = false;
         // 「加载了什么」同理：新进程会重新报一份
         this.envSnapshot = undefined;
+        // 排队中的那几句、上一轮的速度账：都是上一个会话的事，不跟着搬过去。
+        // （以前只清上面那几样，于是换会话后排队文案、生成速度还挂着上一份。）
+        this.queuedSteering = [];
+        this.queuedFollowUp = [];
+        this.tps = undefined;
+        this.genTokens = 0;
+        this.genMs = 0;
+        this.genCallStart = 0;
+        this.genTpsSyncedAt = 0;
     }
 
     // ---- 逐条排队操作 ----
@@ -719,7 +800,7 @@ export class SessionRuntime {
         this.post({ type: "envInfo", env: snapshot });
     }
 
-    /** 扩展报来一条后台命令的开始 / 结束（见 bashProtocol.ts）。 */
+    /** 扩展报来后台命令的开始 / 结束；模型通知由 pi 在交回前填入最新内容。 */
     private noteBashTask(ev: BashTaskEvent): void {
         // 同一编号的结尾只认第一次：不然「停掉」和「进程退出」会各交回会话一次（模型就收到两遍同一件事）
         if (ev.kind === "end") {
@@ -743,12 +824,12 @@ export class SessionRuntime {
             status,
             exitCode: ev.exitCode,
             elapsedMs: ev.elapsedMs,
+            notifyOutput: ev.notifyOutput ?? prev?.notifyOutput ?? false,
         };
         this.bashTasks.set(ev.no, info);
         console.error(`[后台命令] #${ev.no} ${ev.kind === "start" ? "转到后台" : status === "done" ? "跑完" : "结束（" + status + "）"}：${ev.cmd.slice(0, 80)}`);
         this.post({ type: "bashTask", task: info });
         this.syncBashRunning();
-        if (ev.kind === "end") { this.host.onBashTask?.(this.id, info); }
     }
 
     /**
@@ -775,7 +856,11 @@ export class SessionRuntime {
     public stopBashTask(no: number): boolean {
         const task = this.bashTasks.get(no);
         if (!task || task.status !== "running" || !task.pid) { return false; }
-        killTaskTree(task.pid);
+        if (!killTaskTree(task.pid)) {
+            this.post({ type: "bashTask", task });
+            this.post({ type: "systemError", text: `后台命令 #${no} 没能确认停止，仍按实际输出和退出结果通知。` });
+            return false;
+        }
         const next: BashTaskInfo = { ...task, status: "stopped" };
         this.bashTasks.set(no, next);
         this.post({ type: "bashTask", task: next });
@@ -809,6 +894,7 @@ export class SessionRuntime {
     private setPiReady(ready: boolean): void {
         this.piReady = ready;
         this.post({ type: "piReady", ready });
+        this.postPhase();
         this.host.broadcastSessionList();
     }
 
@@ -842,6 +928,10 @@ export class SessionRuntime {
             this.abortRequested = true;
             this.client.send({ type: "abort_bash" });
             this.client.send({ type: "clear_queue" });
+            // 用户已清空队列，通知 pi 内部只取消自己的旧记录；不是模型的新一轮输入。
+            if (this.bashTasks.size > 0) {
+                this.client.send({ type: "prompt", message: "/" + BASH_CLEAR_NOTICE_COMMAND, streamingBehavior: "steer" });
+            }
             this.client.send({ type: "abort" });
         }
     }
@@ -874,9 +964,13 @@ export class SessionRuntime {
         }
         // 插件代发的消息：不当命令解析、也不按「人打的」那种猜法走，投递方式由调用方指定。
         const fromPlugin = opts?.followUp === true || opts?.steer === true;
+        // 人又开口了：上一轮点的那句「卡住了」作废 —— 它只在那一轮停稳时补发一次。
+        // 以前这里不清，于是点过「卡住了」再自己发一句，停稳之后会多冒出一条“卡住了”。
+        // （插件代发的那些不算：子会话交回结果、后台命令交回结果不该顶掉人点的那一下。）
+        if (!fromPlugin) { this.pendingAfterAbort = ""; }
         // 人在这会话里说上话了：那个会话的提醒（跑完一轮 / 在等你答一句）已经过时，收走。
-        // steer 也算（那也是人刚敲的一句话）；插件自己代发的不算（子会话结果、自动接着干那些）。
-        if (opts?.followUp !== true) { this.host.onUserMessage?.(this.id); }
+        // 插件自动交回的输出、完成结果和子会话结果，都不是人新说的话。
+        if (!fromPlugin) { this.host.onUserMessage?.(this.id); }
         // pi 的内置斜杠命令只在终端界面里处理，走 RPC 发过去只会当成普通文字交给模型。
         // 其中 /compact 插件自己接手：改发 pi 的 compact 命令（pi 的 prompt 里做不了这个）。
         // /auto 同样由插件接手（开关状态、判官那一轮的提示都在宿主那边）。
@@ -1009,6 +1103,8 @@ export class SessionRuntime {
         this.activity = activity;
         this.activityDetail = detail;
         this.post({ type: "activityChanged", activity, detail });
+        // 阶段（想 / 工具 / 等）跟着这一下变：界面只读它，不再自己从 activity 拼
+        this.postPhase();
         this.host.broadcastSessionList();
     }
 
@@ -1079,7 +1175,7 @@ export class SessionRuntime {
                 // 话题里多了一条（用户这句 / 上次调用的结果），上下文用量这会儿就变了：
                 // 问一下，别等到这一轮跑完才亮（见 refreshStatsSoon）。
                 const m = evt.message;
-                if (m && (m.role === "user" || m.role === "assistant")) {
+                if (isConversationMessage(m)) {
                     this.hasConversation = true;
                     this.refreshStatsSoon();
                 }
@@ -1180,6 +1276,9 @@ export class SessionRuntime {
                     case "text_delta":
                         this.setActivity("working");
                         if (a.type === "text_delta") {
+                            // 正文开吐了：阶段从“等”换到“写”（这一下的 activity 没变，得单独推）
+                            this.writingText = true;
+                            this.postPhase();
                             this.noteGenTokens(a.delta);
                             // 攒一份「这一轮已经写出来的字」：消息流那一段流式正文就靠它
                             // （手机上那两处只刷最近一次，攒着就不会只知道最后几个字）
@@ -1205,6 +1304,8 @@ export class SessionRuntime {
                 break;
             }
             case "tool_execution_start":
+                // 这一段正文到此为止（界面上那颗笔也换回扳手）：阶段里“工具在跑”压过“在写”
+                this.writingText = false;
                 this.setActivity("tool", typeof evt.toolName === "string" ? evt.toolName : "");
                 this.edits.trackEditStart(evt);
                 this.edits.onToolStart(evt);
@@ -1289,7 +1390,14 @@ export class SessionRuntime {
             case "message_end": {
                 // 一条 assistant 消息吐完了：这次调用的吐字时间到此为止（之后是工具在跑）
                 const m = evt.message;
-                if (m && m.role === "assistant") {
+                if (isBashNoticeMessage(m)) {
+                    // pi 的 message_end 替换已完成：只显示模型实际收到的最终内容。
+                    this.hasConversation = true;
+                    this.post({ type: "userMessage", id: bashNoticeMessageId(m), text: m.content });
+                    this.refreshStatsSoon();
+                } else if (m && m.role === "assistant") {
+                    // 这条正文吐完了：阶段里“写”到此为止（接下来可能是工具、也可能在想）
+                    if (this.writingText) { this.writingText = false; this.postPhase(); }
                     this.endGenCall();
                     // 这条的 usage 出来了：上下文用量该涨一截了，就在这儿刷新
                     this.refreshStatsSoon();
@@ -1303,6 +1411,8 @@ export class SessionRuntime {
                 break;
             case "agent_settled":
                 this.streaming = false;
+                this.writingText = false;
+                this.postPhase();
                 // 这一轮结算速度：没等到 message_end 就停下的（被掐掉、出错的）也在这里封口，
                 // 数发给界面留着，下一轮开始才换掉
                 this.endGenCall();
@@ -1460,53 +1570,56 @@ export class SessionRuntime {
             this.startClient();
         }
         this.loading = true;
+        this.postPhase();
         this.host.broadcastSessionList();
         this.edits.reset();
         this.hasConversation = false;
         this.post({ type: "clear" });
 
-        // 等待 pi 真正就绪（冷启动需数秒），避免命令挤在超时上
-        const ready = await this.waitReady();
-        if (!ready) {
+        // 从头到尾包一层：中途抛错（重画、取消息、切会话）也得把“加载中”复位，
+        // 不然这个会话就永久停在加载态（界面一直在“加载中”，发也发不出去）。
+        try {
+            // 等待 pi 真正就绪（冷启动需数秒），避免命令挤在超时上
+            const ready = await this.waitReady();
+            if (!ready) {
+                this.post({
+                    type: "systemError",
+                    text: "pi 进程未能就绪，无法加载会话。请确认 pi 可正常启动。",
+                });
+                return;
+            }
+
+            const switchResp = await this.request({ type: "switch_session", sessionPath: file });
+            if (!switchResp || switchResp.success === false) {
+                this.post({
+                    type: "systemError",
+                    text: `加载会话失败: ${switchResp?.error ?? "未知错误"}`,
+                });
+                return;
+            }
+
+            const msgResp = await this.request<{ messages: any[] }>({ type: "get_messages" });
+            const messages: any[] = msgResp?.data?.messages ?? [];
+            this.noteSessionReplaced();
+            // replay：这一批是“把历史再画一遍”，跟 replayHistory 同一种东西：界面不给它们挂进场动画
+            //（重播几百条各跑一遍 250 毫秒的进场，手机上是看得出来的卡）
+            this.renderWindowed(messages, { sink: (msg) => this.post({ ...msg, replay: true }) });
+            // 这一屏画完了（跟 replayHistory 那条路的收尾同一个意思）：界面靠它把攒着的重放
+            // 画出来（只画最后一截，见 media/chat.js 的 flushReplayBuf）。没有这条，界面会
+            // 一直攒到下一次消息才画。
+            this.post({ type: "syncPoint" });
+            this.currentSessionPath = file;
+            // 已有会话的标题不会走 session_info_changed，得主动问一次
+            void this.refreshSessionTitle();
+            this.refreshStats();
+        } catch (e: any) {
+            this.post({ type: "systemError", text: `加载会话失败: ${e?.message ?? String(e)}` });
+        } finally {
             this.loadingSessionPath = undefined;
             this.loading = false;
+            this.postPhase();
             this.host.broadcastSessionList();
-            this.post({
-                type: "systemError",
-                text: "pi 进程未能就绪，无法加载会话。请确认 pi 可正常启动。",
-            });
-            return;
         }
-
-        const switchResp = await this.request({ type: "switch_session", sessionPath: file });
-        if (!switchResp || switchResp.success === false) {
-            this.loadingSessionPath = undefined;
-            this.loading = false;
-            this.host.broadcastSessionList();
-            this.post({
-                type: "systemError",
-                text: `加载会话失败: ${switchResp?.error ?? "未知错误"}`,
-            });
-            return;
-        }
-
-        const msgResp = await this.request<{ messages: any[] }>({ type: "get_messages" });
-        const messages: any[] = msgResp?.data?.messages ?? [];
-        this.noteSessionReplaced();
-        // replay：这一批是“把历史再画一遍”，跟 replayHistory 同一种东西：界面不给它们挂进场动画
-        //（重播几百条各跑一遍 250 毫秒的进场，手机上是看得出来的卡）
-        this.renderWindowed(messages, { sink: (msg) => this.post({ ...msg, replay: true }) });
-        // 这一屏画完了（跟 replayHistory 那条路的收尾同一个意思）：界面靠它把攒着的重放
-        // 画出来（只画最后一截，见 media/chat.js 的 flushReplayBuf）。没有这条，界面会
-        // 一直攒到下一次消息才画。
-        this.post({ type: "syncPoint" });
-        this.currentSessionPath = file;
-        // 已有会话的标题不会走 session_info_changed，得主动问一次
-        void this.refreshSessionTitle();
-        this.loadingSessionPath = undefined;
-        this.loading = false;
-        this.host.broadcastSessionList();
-        this.refreshStats();
     }
 
     /**
@@ -1524,8 +1637,13 @@ export class SessionRuntime {
      *                  留一颗「加载更早的消息」按钮，点一下再取。重连后补不上、只能整屏
      *                  重画时用它：那时断线可能已经很久，把整个会话再发一遍、再对一遍账
      *                  在手机上很重，而人看的多半也就是眼下这一轮。
+     * @param opts.imageBudget 这一屏首屏的图片预算（base64 字符数）：undefined 用默认那一份，
+     *                  给 0 就一张图都不带（只发占位，点开再取）。手机上就是这一种（见 chatHost 的
+     *                  inlineImageBudget）。
      */
-    public async replayHistory(opts?: { note?: string; sink?: MessageSink; full?: boolean; lastRound?: boolean }): Promise<void> {
+    public async replayHistory(opts?: {
+        note?: string; sink?: MessageSink; full?: boolean; lastRound?: boolean; imageBudget?: number;
+    }): Promise<void> {
         // 缺省出口是这个会话的常规广播；传了 sink 就是"只给某一个页面重画"。
         // 两条路都要带上 sessionId：界面靠它认出消息属于哪一个会话。
         const sink = opts?.sink;
@@ -1576,9 +1694,9 @@ export class SessionRuntime {
             // 编号基数：窗口模式下窗口不是从第一条开始的，用绝对下标，重放两次的编号才一样
             indexBase: win ? win.start : 0,
             // 网页端这一份只带最近的图（更早的界面上点开再取），否则首屏要传的字节数会很大
-            inlineImages: win ? this.planInlineImages(win.list) : (opts?.full ? this.planInlineImages(messages) : undefined),
+            inlineImages: win || opts?.full ? this.planInlineImages(win ? win.list : messages, opts?.imageBudget) : undefined,
         });
-        const count = messages.filter((m) => m && (m.role === "user" || m.role === "assistant")).length;
+        const count = messages.filter(isConversationMessage).length;
         const note = opts?.note === undefined
             ? "会话已迁入本工作区（{count} 条消息，pi 进程与上下文原样保留）。"
             : opts.note;
@@ -1603,11 +1721,13 @@ export class SessionRuntime {
      * 定下这一屏里哪些图真带数据（其余的只发占位，界面上点开再取）。
      *
      * 从最新一条往前数，累计到预算为止；最新那一张无论多大都带（不然打开来一张图都没有，
-     * 反而像坏了）。返回值是 toolCallId 的集合——一张工具结果里的图要么全带、要么全不带。
+     * 反而像坏了）—— 除非预算给的是 0（手机上就是这样：图全发占位，点开再取）。
+     * 返回值是 toolCallId 的集合——一张工具结果里的图要么全带、要么全不带。
+     * @param budget 这一屏的预算（base64 字符数）；不给就用默认那一份。
      */
-    private planInlineImages(list: any[]): Set<string> {
-        const budget = SessionRuntime.WEB_INLINE_IMAGE_CHARS;
+    private planInlineImages(list: any[], budget: number = SessionRuntime.WEB_INLINE_IMAGE_CHARS): Set<string> {
         const inline = new Set<string>();
+        if (budget <= 0) { return inline; }   // 0 = 一张都不带：整屏都是占位
         let used = 0;
         for (let i = list.length - 1; i >= 0; i -= 1) {
             const m = list[i];
@@ -1635,12 +1755,14 @@ export class SessionRuntime {
     ): ResultImageBlock[] {
         const wanted = !inline || inline.has(toolCallId);
         if (wanted) {
-            // 挪出会话文件的图（只有路径）：这一屏要真带过去的，现在读进内存
-            return images.map((img) => {
+            // 挪出会话文件的图（只有路径）：这一屏要真带过去的，现在读进内存。
+            // 读完 / 本来就在内存里的，缩一缩再发：截图动不动两三 MB，界面上显示出来就几百像素宽
+            // （缩图只在 Windows 上生效，别的系统上照原样发，见 src/imageFit.ts）。
+            return fitResultImages(images.map((img) => {
                 if (!img.path || img.data) { return img; }
                 const data = readStoredImage(img.path);
                 return data ? { data, mimeType: img.mimeType } : { data: "", mimeType: img.mimeType, onDemand: true, bytes: img.bytes, path: img.path };
-            });
+            }));
         }
         if (!images.some((img) => !!img.data || !!img.path)) {
             return images;
@@ -1719,9 +1841,12 @@ export class SessionRuntime {
     //   - 思考全文、工具输出：一个字都不发（只留“一共多少字 + 编号”），全文留在这边，
     //     界面上点开提示框时一次问回来
     //     （键是 `think:<名字>` 与 `result:<toolCallId>`，见 media/chat.js 的 clipOf / pumpClipDetails）；
-    //   - 工具参数：只带“一行字那么多”的摘要字段（命令、路径这些，每个字段最多 160 字，
-    //     write / edit 的正文整个不带），整份留在内存里、点开提示框再取（键是
-    //     `args:<toolCallId>`）——那行一直看得见的调用摘要（`$ 命令`）要用它。
+    //   - 工具参数：整份带上（命令要一个字不差：界面上那行一直看得见的调用摘要
+    //     `$ 命令` 就是它摆出来的），只有 write / edit 的正文与嵌套结构不带；
+    //     带不全的那一份整份留在内存里、点开提示框再取（键是 `args:<toolCallId>`）。
+    //     要省的是“看不见的输出”，输入本身不大（最大的那几样就是 write / edit 的正文，
+    //     已经整个不带了），按字数裁输入只会把命令裁成半截：界面上那行看着还有地方，
+    //     字却断在半路（截断发生在半路上，界面连省略号都没得写）。
     // 实时流与历史重放走的是同一套（实时在 onPiEvent / EditTracker，重放在 renderMessages）。
 
     /**
@@ -1736,14 +1861,16 @@ export class SessionRuntime {
     }
 
     /**
-     * 工具参数：只带“一行字那么多”的摘要字段，整份不发（全文留在内存里，点开提示框再取，
-     * 见 rememberDetail / loadDetails）。
+     * 工具参数：整份带上，一个字都不裁（点开提示框时就不用再取一遍）。
      *
-     * 为什么不能一个字段都不带：界面上那行**一直看得见**的调用摘要（正在跑的那一行
-     * `$ 命令`、标签提示里那一行、文件名）就是从参数里取出来的，不带就只剩一个工具名了。
-     * 所以按“一行字能放下的量”带：短字段原样，长字段裁到一行，嵌套结构不带；
-     * write / edit 的正文（content / oldText / newText）整个不带 —— 那些是几十上百 KB 的大头，
-     * 卡片上本来也有自己的 diff / 预览（预览要等点开提示框取回参数才画）。
+     * 界面上那行**一直看得见**的调用摘要（正在跑的那一行 `$ 命令`、标签提示里那一行、文件名）
+     * 就是从这些参数里取出来的：裁一半就是那行命令断在半路。要省的是看不见的输出
+     * （见上面的说明），输入不大，整份发。
+     *
+     * 带不全的只有两种：write / edit 的正文（content / oldText / newText，几十上百 KB，
+     * 卡片上本来也有自己的 diff / 预览）与嵌套结构（摘要那一行用不上）。
+     * 遇到这两种就把整份留在内存里、带上 `argsOmitted` 与 `detailKey`，界面点开提示框再取
+     * （见 rememberDetail / loadDetails）；一样都没落下的就不留，界面也不用再问。
      */
     public summaryArgs(toolCallId: string, args: unknown): {
         args?: Record<string, unknown>; argsOmitted?: number; detailKey?: string;
@@ -1751,21 +1878,20 @@ export class SessionRuntime {
         let full = "";
         try { full = JSON.stringify(args ?? {}); } catch { return {}; }
         if (!full || full === "{}") { return {}; }   // 没有参数：什么都不用带
-        const detailKey = `args:${toolCallId}`;
-        this.rememberDetail(detailKey, full);
         const summary: Record<string, unknown> = {};
+        let dropped = false;   // 有字段没带上（write / edit 的正文、嵌套结构）
         for (const [key, value] of Object.entries((args ?? {}) as Record<string, unknown>)) {
             // write / edit 的正文：几十上百 KB，界面上这两处都用不到（卡片有 diff / 预览）
-            if (SummaryOmittedArgKeys.has(key)) { continue; }
-            if (typeof value === "string") {
-                summary[key] = value.length > SessionRuntime.ARGS_SUMMARY_CHARS
-                    ? value.slice(0, SessionRuntime.ARGS_SUMMARY_CHARS)
-                    : value;
-            } else if (typeof value === "number" || typeof value === "boolean") {
+            if (SummaryOmittedArgKeys.has(key)) { dropped = true; continue; }
+            if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
                 summary[key] = value;
+            } else {
+                dropped = true;   // 嵌套结构（数组 / 对象）不带：摘要那一行用不上
             }
-            // 嵌套结构（数组 / 对象）不带：摘要那一行用不上
         }
+        if (!dropped) { return { args: summary }; }
+        const detailKey = `args:${toolCallId}`;
+        this.rememberDetail(detailKey, full);
         return { args: summary, argsOmitted: full.length, detailKey };
     }
 
@@ -1883,6 +2009,8 @@ export class SessionRuntime {
     /**
      * 首屏窗口：默认最多 60 条 user/assistant 消息、或者 250 KB（UTF-8），哪个先到算哪个。
      *
+     * 字节按“真会发出去的量”算（见 messageBytes）：思考全文与工具输出全文不发，也就不占预算。
+     *
      * 这两个数是量出来定的（`dev/firstLoad.js --cpu 4`，4 倍降速 ≈ 手机，一个 919 条消息的
      * 真会话）：200 条 / 700 KB 时首屏要下 782 KB 消息、从点开到画完 4.1 秒（其中约 87% 是
      * 界面上收起着的思考全文、工具参数与工具输出）；压到 40 条 / 150 KB 时只剩 127 KB、3.2 秒。
@@ -1919,12 +2047,12 @@ export class SessionRuntime {
         let start = 0;
         for (let i = messages.length - 1; i >= 0; i -= 1) {
             const m = messages[i];
-            if (m && m.role === "user") { start = i; break; }
+            if (m && (m.role === "user" || isBashNoticeMessage(m))) { start = i; break; }
         }
         let hidden = 0;
         for (let i = 0; i < start; i += 1) {
             const m = messages[i];
-            if (m && (m.role === "user" || m.role === "assistant")) { hidden += 1; }
+            if (isConversationMessage(m)) { hidden += 1; }
         }
         return {
             list: messages.slice(start),
@@ -1950,7 +2078,8 @@ export class SessionRuntime {
     } {
         // 从最新一条往前装，装到“条数上限”或“字节预算”哪个先到为止。
         // 两个都要：条数管住 DOM 的规模（一堆「哦」能塞几千条），字节管住真实体量
-        // （一条 bash 输出几十 KB，十条就顶几百条普通消息）。
+        // （一条贴了几十 KB 正文的消息、一条长命令参数就顶几百条普通消息）。
+        // 字节按“真会发出去的量”算（见 messageBytes）：思考与工具输出全文不算在内。
         const cap = this.historyWindowSize();
         const budget = this.historyWindowBudget();
         let start = endBefore;
@@ -1963,20 +2092,19 @@ export class SessionRuntime {
             if (start !== endBefore && (count >= cap || bytes + size > budget)) { break; }
             start = i;
             bytes += size;
-            if (m && (m.role === "user" || m.role === "assistant")) { count += 1; }
+            if (isConversationMessage(m)) { count += 1; }
         }
-        // 起点只能落在 user / assistant 上（跟以前一样）：落在一条工具结果上时，它那条调用
+        // 起点只能落在正文或自己的已填好通知上：落在一条工具结果上时，它那条调用
         // 被切到了上一段里——这一屏里落单的结果没人认，往前补的那一批里又只有调用没有结果，
         // 界面上那颗工具标签就永远转圈、输出也看不见了。
-        while (start < endBefore && messages[start]
-            && messages[start].role !== "user" && messages[start].role !== "assistant") {
+        while (start < endBefore && messages[start] && !isConversationMessage(messages[start])) {
             start += 1;
         }
         let hidden = 0;
         for (let i = 0; i < start; i++) {
             const m = messages[i];
             if (!m) { continue; }
-            if (m.role === "user" || m.role === "assistant") { hidden++; }
+            if (isConversationMessage(m)) { hidden++; }
         }
         return {
             list: messages.slice(start, endBefore),
@@ -2035,8 +2163,10 @@ export class SessionRuntime {
      *
      * 会话在底下换过（换会话 / 换分支后长度变短或第一条对不上）时，旧下标作废，
      * 不往前补了，直接整屏重画一遍重置窗口。
+     * @param imageBudget 点这颗按钮的那块屏的图像预算（同 replayHistory：手机上给 0，只发占位）。
+     *        补发的这批是广播给所有页面的，所以拿发起的那个来算：手机上点的就都不带图。
      */
-    public async loadOlderHistory(): Promise<void> {
+    public async loadOlderHistory(imageBudget?: number): Promise<void> {
         if (this.historyWindowStart <= 0) { return; }  // 没开过窗口 / 窗口正好从头开始（非网页端、全量发过）：按钮不该出现
         const msgResp = await this.request<{ messages: any[] }>({ type: "get_messages" });
         if (!msgResp) {
@@ -2050,7 +2180,7 @@ export class SessionRuntime {
         ) {
             // 窗口记的那份会话已经不在了（压缩过 / 换过分支）：不往前补，整屏重画一遍。
             // 发全量：页面手上本来就有更早的那些，裁成“最近一段”会当场把它们收掉。
-            await this.replayHistory({ note: "", full: true });
+            await this.replayHistory({ note: "", full: true, imageBudget });
             return;
         }
         const win = this.sliceHistoryWindow(messages, this.historyWindowStart);
@@ -2059,7 +2189,7 @@ export class SessionRuntime {
             // replay：这批是“往上补更早的历史”，界面不给它们挂进场动画（见 media/chat.js 的 enterCls）
             this.host.postToSession(this.id, { type: "historyBatchEvent", event: { ...msg, replay: true } });
         };
-        this.renderMessages(win.list, { sink: emit, inlineImages: this.planInlineImages(win.list), indexBase: win.start });
+        this.renderMessages(win.list, { sink: emit, inlineImages: this.planInlineImages(win.list, imageBudget), indexBase: win.start });
         this.post({ type: "historyBatchEnd", hasMore: win.hasMore, hidden: win.hidden });
     }
 
@@ -2078,9 +2208,7 @@ export class SessionRuntime {
         // 缺省还是走这个会话的常规广播；给了 sink 就只发给那一个页面（消息已经带了 sessionId）
         const emit: MessageSink = opts?.sink ?? ((msg) => this.post(msg));
         const revertable = opts?.revertable === true;
-        this.hasConversation = messages.some((m) =>
-            m && (m.role === "user" || m.role === "assistant")
-        );
+        this.hasConversation = messages.some(isConversationMessage);
         // 消息在历史里的绝对下标（窗口模式下加上基数）：重放出来的编号跨次数稳定，
         // 界面靠它认“这条画过了、原地留着”（见 media/chat.js 的 placeNode）。
         const base = opts?.indexBase ?? 0;
@@ -2097,6 +2225,11 @@ export class SessionRuntime {
             // 别的消息上，而界面是按编号原地复用节点的——那就把助手正文塞进用户气泡里了。
             const mid = typeof m.id === "string" && m.id ? `m${m.id}` : `h${base + mi}`;
             switch (m.role) {
+                case "custom":
+                    if (isBashNoticeMessage(m)) {
+                        emit({ type: "userMessage", id: bashNoticeMessageId(m), text: m.content });
+                    }
+                    break;
                 case "user":
                     emit({
                         type: "userMessage",
@@ -2382,6 +2515,9 @@ export class SessionRuntime {
             return;
         }
         this.compacting = true;
+        // 先推阶段：压缩中这一档界面要看得见（以前 activity 变 working 但 streaming 是 false，
+        // 界面当它闲着）
+        this.postPhase();
         this.setActivity("working");
         this.post({ type: "system", text: `正在压缩上下文${why}…` });
         try {
@@ -2408,6 +2544,7 @@ export class SessionRuntime {
             this.post({ type: "systemError", text: `压缩失败: ${e.message}` });
         } finally {
             this.compacting = false;
+            this.postPhase();
             if (!this.streaming) {
                 this.setActivity("idle");
             }
@@ -2482,20 +2619,58 @@ export class SessionRuntime {
  *   · 不用 `JSON.stringify(整条)`：一条 20 MB 的消息那么干就是造一个 20 MB 字符串。
  *     只把文字部分按 UTF-8 累加，再给消息本身加一个小常数。
  */
+/**
+ * 一条消息在首屏上会占多少字节（UTF-8）。
+ *
+ * **按“真会发出去的量”算，不是原文**：首屏窗口那个 250 KB 预算拿它当尺子
+ * （见 sliceHistoryWindow）。思考全文与工具输出全文在界面上是收起的，发出去只剩
+ * “一共多少字 + 编号”那一句（见 DETAIL_PREVIEW_CHARS / clipDetail）；工具参数也只发
+ * 一行摘要（见 summaryArgs）。按原文算的话，一份工具调用多的会话里，这笔预算会被
+ * “一个字都不发”的东西吃光，能装的条数白白变少（实测一个 622 条的会话：老口径 52 条就撞顶，
+ * 其中 212 KB 是永远不发的思考与工具输出）。
+ */
 function messageBytes(m: any): number {
-    if (!m) { return 0; }
+    if (!m || (m.role === "custom" && !isBashNoticeMessage(m))) { return 0; }
     const content = m.content;
-    let bytes = 64;
+    let bytes = 64;   // 消息对象本身的骨头（角色、编号、时间这些）
     if (typeof content === "string") { return bytes + Buffer.byteLength(content, "utf8"); }
     if (!Array.isArray(content)) { return bytes; }
+    // 工具结果：输出全文一个字都不发（界面上点开再取），只留“多少字 + 编号”
+    if (m.role === "toolResult") { return bytes + 96; }
     for (const block of content) {
         if (!block) { continue; }
-        if (typeof block.text === "string") { bytes += Buffer.byteLength(block.text, "utf8"); }
-        else if (typeof block.thinking === "string") { bytes += Buffer.byteLength(block.thinking, "utf8"); }
-        else if (block.type === "toolCall") {
-            try { bytes += Buffer.byteLength(JSON.stringify(block.arguments ?? {}), "utf8"); } catch { bytes += 32; }
-        } else if (block.type === "image") { bytes += 128; }   // 占位的大小，不是 base64 的
-        else { bytes += 32; }
+        switch (block.type) {
+            case "text":
+                // 正文是全发的，照 UTF-8 实算
+                bytes += Buffer.byteLength(block.text ?? "", "utf8");
+                break;
+            case "thinking":
+                bytes += 96;   // 发的是“省略 N 字”那一句，不是全文
+                break;
+            case "toolCall":
+                bytes += toolArgBytes(block.arguments);
+                break;
+            case "image":
+                bytes += 128;   // 占位的大小，不是 base64 的（图另有自己的预算）
+                break;
+            default:
+                bytes += 32;
+        }
+    }
+    return bytes;
+}
+
+/**
+ * 工具参数发出去的那点有多大：跟 {@link SessionRuntime.summaryArgs} 一个口径
+ * ——字符串 / 数字 / 布尔留下（命令、路径这些界面上要看），write / edit 的正文与嵌套结构丢掉。
+ */
+function toolArgBytes(args: unknown): number {
+    if (!args || typeof args !== "object") { return 32; }
+    let bytes = 48;
+    for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+        if (SummaryOmittedArgKeys.has(key)) { continue; }   // 不发的那几样
+        if (typeof value === "string") { bytes += Buffer.byteLength(value, "utf8") + Buffer.byteLength(key, "utf8") + 8; }
+        else if (typeof value === "number" || typeof value === "boolean") { bytes += 24 + Buffer.byteLength(key, "utf8"); }
     }
     return bytes;
 }

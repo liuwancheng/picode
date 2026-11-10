@@ -98,25 +98,25 @@
 
   /* 后台命令那一块（消息流最末尾，见 chat.js 的 renderBashBlock）：一条一行，就长成
      「正在跑的那一条」那样 —— 钟 + 编号 + 命令 + 一颗「停」+ 已经跑了多久（耗时靠右），
-     一行放不下的字自己横向滚（那几条 .tr-* 见下面「正在跑的那一条」那一节，两处共用一套）。
+     写不完的命令折行（那几条 .tr-* 见下面「正在跑的那一条」那一节，两处共用一套）。
      钟跟齿轮是两件事：齿轮转 = 模型这会儿正忙着，你插不进话；钟的针在走 = 这条命令在后台
      自己跑，不挡你说话，跑完它自己把结果交回这个会话。 */
   .bash-running { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; padding: 0 14px; }
   .bash-run {
-    display: flex; align-items: center; gap: 4px; min-width: 0; padding-left: 6px;
+    display: flex; align-items: flex-start; gap: 4px; min-width: 0; padding-left: 6px;
     font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8em; opacity: 0.75;
   }
-  /* 比这一行的字大一圈（1.3em）：表盘跟针在十来像素上才看得清 */
+  /* 跟齿轮一样大（1em）：一行的字多大它就多大，两块图标摆在一起不打架 */
   .bash-clock { flex: 0 0 auto; }
-  .bash-clock svg { display: block; width: 1.3em; height: 1.3em; }
-  /* 钟自己走：长针半秒跳一格（六十格一圈 = 三十秒一圈），短针十二小时一圈。
+  .bash-clock svg { display: block; width: 1em; height: 1em; }
+  /* 钟自己走：长针四分之一秒跳一格（六十格一圈 = 十五秒一圈），短针六分钟一圈。
      为什么不按真钟那样一分钟慢慢扫：这一根针在屏幕上只有三四个像素长，一分钟一圈的话
      针尖一秒走不到半个像素，看着就是「一动不动」—— 量过，放大了看才知道它在动。
-     半秒跳一格（一格 12 度）就一眼看得出「它在走」，还是表盘上扫过去，不像个打转的圈。
+     四分之一秒跳一格（一格 12 度）就一眼看得出「它在走」，还是表盘上扫过去，不像个打转的圈。
      转的是针，绕的是表盘正中（view-box 的 8,8），不是这根线自己的小框。 */
   .bash-clock .ck-hour, .bash-clock .ck-min { transform-box: view-box; transform-origin: 8px 8px; }
-  .bash-clock .ck-min { animation: bash-clock-min 30s steps(60, end) infinite; }
-  .bash-clock .ck-hour { animation: bash-clock-hour 720s linear infinite; }
+  .bash-clock .ck-min { animation: bash-clock-min 15s steps(60, end) infinite; }
+  .bash-clock .ck-hour { animation: bash-clock-hour 360s linear infinite; }
   @keyframes bash-clock-min { to { transform: rotate(360deg); } }
   @keyframes bash-clock-hour { to { transform: rotate(360deg); } }
   /* 不做「减少动态效果」的例外：这根针一停，这一块看着就跟「没在跑」一个样，
@@ -287,6 +287,13 @@
     /* 呼吸只改这一颗的透明度：让它自己占一层，别带着整格（连那道阴影）每帧重画一遍。 */
     will-change: opacity;
   }
+  /* 有一道题在等你答：那颗点变黄、不呼吸 —— 它没在跑，它在等你。
+     （以前这一档除了右下角那张卡片，界面上哪里都看不出来，顶条上它跟闲着一样。） */
+  .sn-tab.awaiting .sn-dot {
+    background: var(--vscode-charts-yellow, #d97706);
+    animation: none;
+    will-change: auto;
+  }
   /* 骨架里那一格在没会话时藏着（见 renderHtml / chat.js 的 sessionTabEl）：藏着的量不到宽，
      所以排这一排格时也不拿它算地方（见 chat.js 的 layoutSessionTabs）。 */
   #sessionTabs .sn-tab.hidden { display: none; }
@@ -365,22 +372,43 @@
      字照旧留着，到新的命令来把它顶掉；整条在这一批过去（下面出正文 / 问话卡片、
      或者这一轮跑完）时收掉。
      摘要本来只在提示框里，这里直接写出来：一颗「bash」看不出它在跑什么。
-     一行放不下的（长命令行）字自己横向滚，只往一个方向（见下面），放得下的就静静摆着；
-     冻住的照旧滚（滚是为了看全命令，不是在说还在跑）。
+     命令整条摆出来（不藏）：切成几段摆成一条链（见 chat.js 的 runningLineParts）；一步一行
+     （只有分隔符会换行，别处一律不折），一步太长就在行尾省掉（点开这一行看整条）。
      左内边距 6px 跟工具标签自己的内外边距一样（见 .tool 的 padding）：两处的齿轮要在同一条竖线上。 */
   .tool-running { display: flex; flex-direction: column; gap: 2px; margin: 2px 0; padding: 0 14px; }
-  .tool-running-item { display: flex; align-items: center; gap: 4px; min-width: 0; padding-left: 6px; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8em; opacity: 0.75; }
-  .tool-running-item .tool-icon { flex: 0 0 auto; animation: tool-spin 1.1s linear infinite; }
+  .tool-running-item { display: flex; align-items: flex-start; gap: 4px; min-width: 0; padding-left: 6px; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8em; opacity: 0.75; }
+  /* 齿轮跟钟都跟第一行字对齐（这一块可能是好几行：一步一行） */
+  .tool-running-item .tool-icon { flex: 0 0 auto; margin-top: 2px; animation: tool-spin 1.1s linear infinite; }
+  .bash-run .bash-clock { margin-top: 2px; }
   /* 跑完的那一条：齿轮停住（这一条上那颗是「在不在跑」的指示），字与耗时都留着不动 */
   .tool-running-item.done .tool-icon { animation: none; }
-  /* 字自己滚的时候，后面那个耗时不跟着动：它钉在这一条的末尾（margin-left: auto 推到右边），
-     不缩水（flex: 0 0 auto），所以字滚它的、数字坐它的。
+  /* 耗时不跟着字动：它钉在这一条的末尾（margin-left: auto 推到右边），不缩水（flex: 0 0 auto），
+     所以字折行它的、数字坐在右上角。
      下面这几条 .tr-* 两处共用：「正在跑的那一条」（.tool-running-item）与消息流末尾的后台命令
      （.bash-run，见上面的 .bash-running）。 */
   .tool-running-item .tr-time, .bash-run .tr-time { flex: 0 0 auto; margin-left: auto; padding-left: 8px; opacity: 0.8; font-variant-numeric: tabular-nums; }
-  .tool-running-item .tr-text, .bash-run .tr-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* 一长串命令只写了核心那一段时，后面跟一个「+N」（见 chat.js 的 runningLineText）：
-     灰一点、不跟着字横向滚，也不缩水 —— 一眼就知道还有没写出来的那几段，整条在那个提示框里看。 */
+  /* 这一条的字：一条链，一步一块（.tr-step）。
+     只有分隔符会换行：每步是块级元素，所以下一个分隔符一来就另起一行；没有行数上限。 */
+  .tool-running-item .tr-content, .bash-run .tr-content { flex: 1 1 auto; min-width: 0; }
+  .tool-running-item .tr-text, .bash-run .tr-text { display: block; line-height: 1.45; min-width: 0; }
+  /* 一步一行：有分隔符就换行（每步是一个块）。一步自己太长**不折行**，直接在行尾省掉（「…」），
+     整条在那个提示框里看 —— 一长串参数折成三四行比省掉更难认。 */
+  .tool-running-item .tr-step, .bash-run .tr-step {
+    display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* 一步里的命令部分不自己缩到没有：放不下就整步换行（上面那条 min-width: 0 只管「一步比一行还长」那种） */
+  .tool-running-item .tr-step > .tr-seg, .bash-run .tr-step > .tr-seg,
+  .tool-running-item .tr-step > .tr-seg-dim, .bash-run .tr-step > .tr-seg-dim { overflow-wrap: anywhere; }
+  /* 链上的几段：`$` 提示符、段与段之间的分隔符（&& | ; 照原样写）、只看一眼不改东西的那几段（字淡）。
+     淡只改深浅、一个字也不藏：以前是拿这套判断把「不重要的那几段」藏起来的，藏错过好几回
+     （`git log; rm -rf dist; npm run build` 只写了 git log），现在判错了也就是深浅不对。
+     分的是「只读 / 会改东西」（见 chat.js 的 isReadOnlySegment）：会改的那些才该被看见，
+     认不准的一律不淡（淡了容易看漏）。 */
+  .tool-running-item .tr-prompt, .bash-run .tr-prompt { flex: 0 0 auto; opacity: 0.45; margin-top: 0; }
+  .tool-running-item .tr-sep, .bash-run .tr-sep { opacity: 0.4; }
+  .tool-running-item .tr-seg-dim, .bash-run .tr-seg-dim { opacity: 0.55; }
+  /* 一长串命令有没摆出来的段（段太多 / 正文太长）时，后面跟一个「+N」（见 runningLineParts）：
+     灰一点、不缩水 —— 一眼就知道还有没写出来的，整条在那个提示框里看。 */
   .tool-running-item .tr-more { flex: 0 0 auto; opacity: 0.6; font-size: 0.92em; }
   /* 这一条是 bash 命令时，右边多出来那颗「放后台」（见 chat.js 的 syncRunningLine）：
      点了就把这条命令转到后台，不在这儿等它跑完。它排在耗时左边：字 | 按钮 | 耗时（靠右）。 */
@@ -392,22 +420,6 @@
   }
   .tool-running-item .tr-act:hover, .bash-run .tr-act:hover { opacity: 1; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.2)); }
   .tool-running-item .tr-act:disabled, .bash-run .tr-act:disabled { opacity: 0.45; cursor: default; }
-  /* 一行放不下的（长命令行）：字自己横向滚，只往一个方向 —— 从头滚到末尾，到末尾停一下、
-     再从开头来（不回程）。滚多远（--tr-shift）、一趟多久（--tr-dur）由 chat.js 量出来现算
-     （见 rollRunningText）。两头的停顿是固定半秒，写在一条一份的 keyframes 里（叫 tr-roll-<编号>，
-     由 chat.js 插进来）—— 下面这份只当兜底：停顿在 keyframes 里只能写成百分比，按百分比算的话
-     命令越长开头死得越久（一千字的命令头六秒不动）。
-     滚起来就不要末尾省略号了（那个「…」会钉在右边不动，字从底下过）。
-     系统里开了「减少动态效果」也照旧滚：这一条滚的就是一行字、又是慢慢走的，不碍事；
-     停下来就只剩截断（下面那条 clip 把省略号也去掉了），后面那半条命令在界面上就再也看不全
-     ——真机上撞到过：人看到的是半截命令一动不动，以为界面卡住了。 */
-  .tool-running-item .tr-text.roll, .bash-run .tr-text.roll { text-overflow: clip; }
-  .tool-running-item .tr-run, .bash-run .tr-run { display: block; }
-  .tool-running-item .tr-text.roll .tr-run, .bash-run .tr-text.roll .tr-run { animation: tr-roll var(--tr-dur, 6s) linear infinite; }
-  @keyframes tr-roll {
-    0%, 3% { transform: translateX(0); }
-    94%, 100% { transform: translateX(var(--tr-shift, 0px)); }
-  }
   /* 合并标签（连着来的同名调用收成一个）：工具名 + 次数小方块（只调一次就不写数字）。
      次数不用乘号：标签字号是正文的 0.8 倍，乘号在这个尺寸只剩几个像素，两条斜线
      怎么画都发虚；改成一个小色块把数字框住，一眼看得出这是"几次"。
@@ -1009,12 +1021,36 @@
   .pk-host.pk-folders #pickerPanel { width: min(560px, 94vw); max-height: 76vh; }
   .pk-host.pk-folders .pk-header { align-items: center; padding: 8px 12px 2px; border-bottom: 0; }
   .pk-host.pk-folders .pk-header .pk-header-title { font-size: 13px; }
-  /* 这一格的分割线改挂在目录那条下面（标题与目录之间不再画线） */
+  /* 这一格的分割线改挂在目录那条下面（标题与目录之间不再画线）；
+     底下还跟着一条工具条时那条线由工具条来画（两条挨着就成了两道线） */
   .pk-host.pk-folders .pk-subtitle { padding-bottom: 8px; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); }
+  .pk-host.pk-folders .pk-subtitle:has(+ .pk-folder-tools) { border-bottom: 0; }
+  /* 顶上那条工具条：左边一颗往上走，右边「新建文件夹」。清单里只有目录，这两件事是工具
+     （真正要“就这么定了”的那一下在底部那颗主按钮上，跟别的浮层一个规矩）。 */
+  .pk-host.pk-folders .pk-folder-tools {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 12px; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+  }
+  .pk-host.pk-folders .pk-folder-tools button {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    font: inherit; font-size: 12px; line-height: 1.3;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    background: transparent; color: var(--vscode-foreground, inherit);
+  }
+  .pk-host.pk-folders .pk-folder-tools button:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.2)); }
+  /* 往上走那颗只有图标，两边少留一点（跟右边那颗带字的摆在一起时看着一样高） */
+  .pk-host.pk-folders .pk-folder-tools .pk-folder-up { padding: 3px 5px; }
+  .pk-host.pk-folders .pk-folder-tools button svg { width: 13px; height: 13px; display: block; opacity: 0.85; }
   .pk-host.pk-folders .pk-body { padding: 4px 0 8px; font-size: 13px; }
   .pk-host.pk-folders .pk-item { padding: 3px 12px; border-radius: 0; }
   /* 图标与名字挨得比抽屉里紧一点（抽屉的一行里还有颗状态点，这一行只有图标加名字） */
   .pk-host.pk-folders .pk-history-main { gap: 6px; }
+  /* 工具条那颗「新建文件夹」摊出来的输入框：这一层行矮（上下各 3px），框自己撑高一点才不夹着字；
+     框往左探出去一点（比图标那列还往左 6px），里头的字才“跟下面那些名字对齐”
+     （行首图标 14px + 图标与名字之间 6px），字也没紧贴着边框 */
+  .pk-host.pk-folders .pk-item.pk-newfolder-input-row { padding-left: 26px; }
+  .pk-host.pk-folders .pk-item.pk-newfolder-input-row .sn-rename { height: 20px; padding: 0 6px; }
   /* ---- 列表上半段「正在对话」：现在开着的会话 ---- */
   /* 一行里：小点 · 名字 · 标记 · 关闭叉（叉在最右边，不会跟名字挤在一起）。 */
   .pk-host.pk-drawer .pk-item.pk-open { display: flex; align-items: center; gap: 4px; }
@@ -1557,6 +1593,7 @@
   .ct-cell .ct-act[data-act="waiting"],
   .ct-cell .ct-act[data-act="writing"],
   .ct-cell .ct-act[data-act="thinking"],
+  .ct-cell .ct-act[data-act="answer"],
   .ct-cell .ct-act[data-act="tool"] {
     display: block;
     -webkit-mask-image: var(--ci-icon); mask-image: var(--ci-icon);
@@ -1594,6 +1631,14 @@
     background-color: var(--vscode-charts-green, #16a34a);
     animation: ct-appear-tool 0.18s ease-out, ct-wrench 1.2s ease-in-out infinite;
   }
+  /* 有一道题在等你答（ask_choice 那个工具就停在那儿）：同一个沙漏，换成黄的 ——
+     跟右下角那张提醒卡片左边那条黄线一个意思（那张卡片也是“等你答”才黄）。
+     它不是“在跑”，是“在等你”，所以在会话格上也不呼吸（见下面 .sn-tab.awaiting）。 */
+  .ct-cell .ct-act[data-act="answer"] {
+    --ci-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M6 2h12v2h-1L12 12 7 4H6zM6 22h12v-2h-1L12 12 7 20H6z'/%3E%3C/svg%3E");
+    background-color: var(--vscode-charts-yellow, #d97706);
+    animation: ct-appear-waiting 0.18s ease-out, ct-hourglass 2.6s ease-in-out infinite;
+  }
   /* 换形象时那一下淡入：形状是硬切的（mask 不能过渡），靠这 180ms 把切口藏在淡入里。
      四条内容一样、名字故意不同 —— 同一个 animation-name 在切换时不会重放，
      只有名字变了浏览器才当成一条新动画从头放。 */
@@ -1614,7 +1659,7 @@
      它们就是用来表明“还在跑”的，停了就跟没了一样（这条跟以前一样，是有意不理那个设置）。 */
   @media (prefers-reduced-motion: reduce) { /* 用量那条现在没有过渡（渐变换不了），这条留着占个位 */ }
 
-  /* 剩下那几样“一直动”的小东西（顶条那颗点的呼吸、齿轮、那行命令自己横向滚）单独量下来
+  /* 剩下那几样“一直动”的小东西（顶条那颗点的呼吸、齿轮）单独量下来
      每一样都在 1 个点以内（吐字时），丢了反而让人觉得“怎么不动了”，都留着，电脑和手机一样。
      两头都不动的只有这几样：排队那条上的黄点、顶边框上那条用量、输入框那圈流光
      （黄点与横杠这两样没有信息、只是装饰，早先删了；流光 13 个点，删了换成一根绿边）。 */

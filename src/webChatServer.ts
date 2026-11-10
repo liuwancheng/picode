@@ -28,6 +28,7 @@ import { findListedFile } from "./fileSearch";
 import type { SessionChanges } from "./gitChanges";
 import { readRemoteNotice, type RemoteNotice } from "./remoteNotice";
 import { changedCharRanges, diffRows, type LineRanges } from "./wordDiff";
+import { isStrippable, stripForWire } from "./stripText";
 
 /**
  * PiChatWebServer —— 独立后端的网页服务：一个地址，手机和电脑都看这一份会话。
@@ -347,8 +348,10 @@ export interface WebServerHost {
     /**
      * 一条推送连接建立（页面连上 / 重连）。
      * @param since 页面报上来的「我处理到第几条」（连接地址上的 since），没报就是 undefined。
+     * @param width 页面报上来的屏宽（连接地址上的 w，CSS 像素），没报就是 undefined：
+     *        宿主按它决定首屏的图要不要一起发（窄屏只发占位，见 chatHost 的 inlineImageBudget）。
      */
-    onPageConnected(pageId: string, since?: number): void;
+    onPageConnected(pageId: string, since?: number, width?: number): void;
     /** 一条推送连接断了（页面关掉 / 死连接被掐掉）。 */
     onPageDisconnected(pageId: string): void;
     /** 服务起来了（缓冲可以开始攒：页面可能马上要来）。 */
@@ -393,6 +396,8 @@ export class PiChatWebServer {
     private readonly backlogBytes = STREAM_BACKLOG_BYTES;
     /** 压缩结果缓存：界面文件的内容没变时不用重压（键是"压缩方式@文件名@修改标记"，见 sendMedia）。 */
     private readonly compressCache = new Map<string, Buffer>();
+    /** 去过注释的那份界面文件（文件没变就一直用它，见 wireBytes）。 */
+    private readonly wireCache = new Map<string, { stamp: string; data: Buffer }>();
     /** 本次监听开始服务的时刻（`/health` 报出去；重启会更新）。 */
     private startedAt = 0;
     private settings: WebServerSettings = { enabled: false, port: 0, host: "0.0.0.0", trustedOrigins: [] };
@@ -677,7 +682,8 @@ export class PiChatWebServer {
             }
             if (pathname === "/events") {
                 if (req.method !== "GET") { this.sendText(req, res, 405, "只接受 GET。"); return; }
-                this.openChannel(req, res, url.searchParams.get("pageId") ?? "", url.searchParams.get("since") ?? "");
+                this.openChannel(req, res, url.searchParams.get("pageId") ?? "", url.searchParams.get("since") ?? "",
+                    url.searchParams.get("w") ?? "");
                 return;
             }
             if (pathname === "/api") {
@@ -823,11 +829,28 @@ export class PiChatWebServer {
         const stamp = mediaStamp(this.mediaDir, name);
         fs.readFile(path.join(this.mediaDir, name), (err, data) => {
             if (err) { this.sendText(req, res, 404, "没有这个资源。"); return; }
-            this.writeBody(req, res, 200, data, {
+            this.writeBody(req, res, 200, this.wireBytes(name, data, stamp), {
                 "Content-Type": contentTypeOf(name),
                 "Cache-Control": cacheable ? "public, max-age=31536000, immutable" : "no-store",
             }, stamp ? `${name}@${stamp}` : undefined);
         });
+    }
+
+    /**
+     * 发出去的这份字节：界面文件里的脚本与样式先去掉注释（理由与规则见 src/stripText.ts）。
+     * 同一个文件只去一次（内存里留着）；文件变了就重新去。
+     */
+    private wireBytes(name: string, data: Buffer, stamp: string): Buffer {
+        if (!isStrippable(name)) { return data; }
+        const cached = this.wireCache.get(name);
+        if (cached && cached.stamp === stamp) { return cached.data; }
+        const text = data.toString("utf8");
+        const out = Buffer.from(stripForWire(name, text), "utf8");
+        // 去完反倒变大（不可能，但真出怪事就别用）：照原样发
+        const result = out.length < data.length ? out : data;
+        if (this.wireCache.size > 16) { this.wireCache.clear(); }
+        this.wireCache.set(name, { stamp, data: result });
+        return result;
     }
 
     /**
@@ -1578,8 +1601,12 @@ export class PiChatWebServer {
      *
      * 重连时页面会在地址上多带一个 `since`（它处理到第几条）。断线期间漏掉的那几条由
      * 宿主按这个数接着往下发（见 ChatBroadcaster.resume），页面不用再发一条消息来对账。
+     *
+     * 再带一个 `w`（这块屏多宽）：宿主靠它认“这块屏是不是手机”，首屏的图只给它发占位
+     * （见 chatHost 的 inlineImageBudget）。不带（旧的页面、或者别的东西来连）就当宽屏。
      */
-    private openChannel(req: http.IncomingMessage, res: http.ServerResponse, pageId: string, sinceText: string): void {
+    private openChannel(req: http.IncomingMessage, res: http.ServerResponse, pageId: string, sinceText: string,
+        widthText: string): void {
         // 页面标识正常都是服务发出页面时写进去的那个；万一没有就自己编一个，别把好几个页面混成一条
         const id = pageId || `p-anon-${crypto.randomUUID()}`;
         const broadcaster = this.host.getBroadcaster();
@@ -1615,7 +1642,7 @@ export class PiChatWebServer {
         res.on("error", onClose);
         // 断线这段时间广播出去的消息按页面报的序号补给这个页面（补不上、或者序号对不上时，
         // 宿主那头会整屏重画一次）。
-        this.host.onPageConnected(id, parseSince(sinceText));
+        this.host.onPageConnected(id, parseSince(sinceText), parseSince(widthText));
     }
 
     /**
@@ -1714,7 +1741,7 @@ export class PiChatWebServer {
             this.hooks.log(`屏 ${id} 已经 ${Math.round(this.pageStaleMs / 1000)} 秒没有任何动静，` +
                 "把它从登记簿里拿掉（插件会自己重连）。");
             const res = this.screenStreams.get(id);
-            this.dropScreen(id);
+            this.dropScreen(id, res);
             if (res) { this.endStream(res, ""); }
         }
         for (const screen of screens.list()) {
@@ -1849,7 +1876,7 @@ export class PiChatWebServer {
         const old = this.screenStreams.get(id);
         this.screenStreams.set(id, res);
         if (old && old !== res) { try { old.destroy(); } catch { /* 已经断了 */ } }
-        const onClose = () => { this.dropScreen(id); };
+        const onClose = () => { this.dropScreen(id, res); };
         res.on("close", onClose);
         res.on("error", onClose);
         this.host.attachScreen(id, folders, (msg) => {
@@ -1859,22 +1886,30 @@ export class PiChatWebServer {
 
     /** 往一条屏连接写一段内容；写不动了就把它注销掉（插件那边会自己重连）。 */
     private writeScreenChunk(id: string, res: http.ServerResponse, chunk: string): void {
-        if (res.writableEnded || res.destroyed) { this.dropScreen(id); return; }
+        if (res.writableEnded || res.destroyed) { this.dropScreen(id, res); return; }
         try {
             const flushed = res.write(chunk);
             if (!flushed && res.writableLength > this.backlogBytes) {
-                this.hooks.log(`屏 ${id} 有一阵子没在读推送流（积压 ${Math.round(res.writableLength / 1024)} KB），" +
-                    "掐掉这条连接，插件会自己重连。`);
-                this.dropScreen(id);
+                this.hooks.log(`屏 ${id} 有一阵子没在读推送流（积压 ${Math.round(res.writableLength / 1024)} KB），` +
+                    "掐掉这条连接，插件会自己重连。");
+                this.dropScreen(id, res);
             }
         } catch {
-            this.dropScreen(id);
+            this.dropScreen(id, res);
         }
     }
 
-    /** 断开一条屏连接（窗口关了 / 网断了 / 积压太多）。 */
-    private dropScreen(id: string): void {
-        if (!this.screenStreams.has(id)) { return; }
+    /**
+     * 断开一条屏连接（窗口关了 / 网断了 / 积压太多）。
+     *
+     * @param res 报关闭的那条连接。同一个窗口重连时，旧连接会换下来、又迟到地报一条关闭：
+     *            那一份不能动新连接的东西（不比对的话，新的那条流和登记会被一起删掉，
+     *            那个窗口就再也收不到推送了）。页面那条早就这么比了（见 dropChannel）。
+     */
+    private dropScreen(id: string, res?: http.ServerResponse): void {
+        const current = this.screenStreams.get(id);
+        if (!current) { return; }
+        if (res && current !== res) { return; }
         this.screenStreams.delete(id);
         this.host.detachScreen(id);
     }

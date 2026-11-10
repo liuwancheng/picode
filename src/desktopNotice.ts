@@ -8,8 +8,9 @@
  * 卡片什么时候没：人点掉它、点右上角那颗 ×、那个会话里有人说上话了（见 ChatHost 的
  * onUserMessage）、那个会话被关掉了、那道选择题答完了。它自己不会到点消失。
  *
- * 点卡片做什么：把这件事交回宿主（onClick），由宿主叫连着的网页切到那个会话
- * （见 ChatHost.openNotice）。它自己不碰浏览器窗口：不提窗口，也不新开浏览器。
+ * 点卡片做什么：把这件事交回宿主（onClick），由宿主叫连着的网页切到那个会话，又叫这边
+ * 把开着那个页面的窗口提到前面（{@link DesktopNotice.raise}；两件事都见 ChatHost.openNotice）。
+ * 提窗口只在真找得到那个窗口时发生：找不到就把这张收掉完事，不去新开浏览器。
  * （下面那个 openInBrowser 是另一回事：后端带 --open 起来时，给这台开一下页面。）
  *
  * 这台机器上弹不出来（不是 Windows、那支小程序没编出来、被杀软拦了）就一路静悄悄地不发，
@@ -125,33 +126,89 @@ export class DesktopNotice {
     private dead = false;
     /** 标准输出攒到这儿，一行一行拆（一段数据里可能是半行、也可能好几行）。 */
     private rest = "";
+    /**
+     * 屏幕上现在有哪几张：真事实在那支小程序里（它自己会因点叉、三张挤掉最老而收卡），
+     * 这里存一份镜像 —— 好让后端知道该不该写 close（没有那张还去写，会把已经退了的
+     * 小程序又拉起来），也好把屏幕上这几张一下全收掉。
+     * 键与顺序都跟那边一致：同一个标识再来一条是“换掉旧的”（删了再插到末尾），
+     * 超过三张时挤掉最老的那张。
+     */
+    private readonly shown = new Map<string, { ask: boolean; title: string }>();
+    /** 跟 bin/notice.cs 的 Hub.MaxCards 一个数：屏幕上最多同时几张。 */
+    private static readonly MAX_CARDS = 3;
 
-    constructor(private readonly options: DesktopNoticeOptions) {}
+    constructor(private readonly options: DesktopNoticeOptions = { log: () => { /* 默认不记 */ }, onClick: () => { /* 默认不管 */ } }) {}
 
     /**
      * 弹一张。同一个标识的卡片只换不堆（后来那条顶掉旧的）。
      * @param tag 卡片左上角那颗小标签写的字（设置里那行「标签」，空着就不挂标签）
      */
     public show(key: string, title: string, body: string, ask: boolean, tag = ""): void {
-        this.write(["show", key, ask ? "1" : "0", base64(title), base64(body), base64(tag)].join("\t"));
+        // 镜像先更新：同一个标识是“换掉旧的”（跟那边一样），超过三张挤掉最老的
+        this.shown.delete(key);
+        this.shown.set(key, { ask, title });
+        while (this.shown.size > DesktopNotice.MAX_CARDS) {
+            const oldest = this.shown.keys().next();
+            if (oldest.done) { break; }
+            this.shown.delete(oldest.value);
+        }
+        this.write(["show", key, ask ? "1" : "0", base64(title), base64(body), base64(tag)].join("\t"), true);
     }
 
-    /** 收走某一标识的那一张（没有就什么也不做）。 */
+    /**
+     * 收走某一标识的那一张（屏幕上本来就没有就什么也不做）。
+     *
+     * “本来就没有”这一条是故意的：没有那张还写过去的话，write 会把已经退了的小程序
+     * 又拉起来一支（它平时不在后台待着）。
+     */
     public close(key: string): void {
-        this.write("close\t" + key);
+        if (!this.shown.delete(key)) { return; }
+        this.write("close\t" + key, false);
     }
+
+    /** 把屏幕上还开着的全收掉（设置里关掉「弹窗通知」时用）。 */
+    public closeAll(): void {
+        if (this.shown.size === 0) { return; }
+        this.shown.clear();
+        this.write("closeall", false);
+    }
+
+    /**
+     * 把一个窗口提到前面（在 Windows 上按窗口标题找）。人点了提醒卡片时用：
+     * 那边叫网页切到那个会话，这边把开着那个页面的窗口提上来（见 ChatHost.openNotice）。
+     *
+     * 给的就是页面标题那一份（见 pageHtml 的 pageTitle）。找窗口的事在那支小程序里做
+     * （Node 这边没有调 Windows 接口的路子），它的找法与提法见 bin/notice.cs 的 Raiser：
+     * 标题正好相等（`--app=` 开的、「安装成应用」装出来的那种窗口），
+     * 或者以「标题 + ` - `」开头（普通浏览器窗口，而那张贴在前面的就是它），
+     * 先还原再提前面；多个都对得上时提 Z 序最上面那个。
+     *
+     * **找不到就什么也不做**（也不新开浏览器），这几种都找不到：页面没开着、
+     * 页面只停在普通浏览器窗口的背景 tab 里（那种窗口的标题跟着活动的那张贴走，提不起来也认不出来）、
+     * 页面只在插件的对话面板里开着。别台机器推来的那张卡片也一样：本机没有那个页面。
+     *
+     * 没弹过卡片就不起小程序（那会儿屏幕上本来也没东西要看）。
+     */
+    public raise(title: string): void {
+        if (!title) { return; }
+        this.write(["raise", base64(title)].join("\t"), false);
+    }
+
+    /** 屏幕上现在有哪几张（调试与验证用；键就是 show 时的那个）。 */
+    public shownKeys(): string[] { return Array.from(this.shown.keys()); }
 
     /** 后端要走了：把它也收掉（关了标准输入它自己退）。 */
     public dispose(): void {
+        this.shown.clear();
         const child = this.child;
         this.child = undefined;
         if (!child) { return; }
         try { child.stdin?.end(); } catch { /* 已经没了 */ }
     }
 
-    /** 写一行过去；还没起来就先把它起起来。 */
-    private write(line: string): void {
-        const child = this.ensure();
+    /** 写一行过去。@param spawn 没起来时要不要现在把它起起来（只有 show 要）。 */
+    private write(line: string, spawn: boolean): void {
+        const child = spawn ? this.ensure() : this.child;
         if (!child) { return; }
         try {
             child.stdin?.write(line + "\n");
@@ -208,7 +265,9 @@ export class DesktopNotice {
     }
 
     /**
-     * 收它说的话：一行一条 `click\t<标识>`（人点了卡片）。
+     * 收它说的话：一行一条。
+     *   click\t<标识>    人点了那张卡片（后端据此叫开着的网页切过去）
+     *   closed\t<标识>   那张自己没了（点了右上角那颗叉、或者三张挤掉最老）—— 后端那份镜像跟着删
      */
     private read(chunk: Buffer): void {
         this.rest += chunk.toString("utf8");
@@ -219,6 +278,7 @@ export class DesktopNotice {
             index = this.rest.indexOf("\n");
             const parts = line.split("\t");
             if (parts[0] === "click" && parts[1]) { this.options.onClick(parts[1]); }
+            if (parts[0] === "closed" && parts[1]) { this.shown.delete(parts[1]); }
         }
     }
 }

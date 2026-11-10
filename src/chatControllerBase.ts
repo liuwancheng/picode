@@ -41,7 +41,7 @@ import { TABA_DECODER } from "./tabaProtocol";
 import { ASK_DECODER } from "./askProtocol";
 import type { AskRequest } from "./askProtocol";
 import { StderrFrameSplitter } from "./piFrames";
-import { BASH_DECODER, BashTaskInfo, buildBashTaskDelivery, readBashLogTail } from "./bashProtocol";
+import { BASH_DECODER } from "./bashProtocol";
 import { ENV_DECODER } from "./envProtocol";
 import {
     TabaRegistry,
@@ -70,6 +70,7 @@ import {
     type AutoState,
 } from "./auto";
 import { promptText } from "./promptText";
+import { isBusyPhase, type SessionAttention } from "./sessionPhase";
 import { dropAuto, readAuto, writeAuto } from "./autoFiles";
 import type { RpcSessionState } from "./piRpc";
 import { clipText } from "./messageUtils";
@@ -711,6 +712,10 @@ export abstract class ChatControllerBase implements RuntimeHost {
     /** RuntimeHost.wantsTrimmedHistory：VSCode 这两家整屏重画照旧全量；网页端那份覆写成 true。 */
     public wantsTrimmedHistory(): boolean { return false; }
 
+    /** 这块屏首屏的图片预算：undefined = 用运行时默认那一份（见 ChatHost 的同名方法）。
+     *  VSCode 这两家（面板、编辑器那边）都是宽屏，照旧全发。 */
+    public inlineImageBudget(_clientId: string): number | undefined { return undefined; }
+
     // ---- 查找 ----
     /** 这块屏现在显示的会话（不传 = 正在说话的那块屏）。 */
     public getActive(clientId: string = this.currentPageId): SessionRuntime | undefined {
@@ -737,19 +742,29 @@ export abstract class ChatControllerBase implements RuntimeHost {
         this.onClientSessionChanged(clientId, panelId);
     }
 
+    /**
+     * 这块屏现在还连着吗。
+     *
+     * 默认“连着”。宿主覆写它（见 chatHost 的 broadcaster：通道还在才算）。
+     * 为什么要问这一句：下面的“谁在看”只登记不销号 —— 关掉的标签页、拔掉网的手机
+     * 永远留在表里，于是“有人看着这个会话”永远成立，需要人回答的弹窗
+     *（确认框 / 输入框 / 问答题）会白等到超时，而不是当场走“没人看着”的兜底。
+     */
+    protected isClientLive(_clientId: string): boolean { return true; }
+
     /** 有没有屏在看这个会话（状态上报这类“只跟人正在看的会话走”的事看它）。 */
     protected isFocusedPanel(panelId: string): boolean {
-        for (const id of this.clientSessions.values()) {
-            if (id === panelId) { return true; }
+        for (const [clientId, id] of this.clientSessions) {
+            if (id === panelId && this.isClientLive(clientId)) { return true; }
         }
         return false;
     }
 
-    /** 现在正看着这个会话的屏（一个都没在看就是空表）。 */
+    /** 现在正看着这个会话的屏（一个都没在看就是空表；已断开的屏不算）。 */
     public clientsViewing(panelId: string): string[] {
         const out: string[] = [];
         for (const [clientId, id] of this.clientSessions) {
-            if (id === panelId) { out.push(clientId); }
+            if (id === panelId && this.isClientLive(clientId)) { out.push(clientId); }
         }
         return out;
     }
@@ -774,7 +789,7 @@ export abstract class ChatControllerBase implements RuntimeHost {
     }
 
     /** 新建一个会话并切过去（成为这块屏现在看的会话）。只建新的，不动旧的那个
-     *  （顶条那颗加号那条路会顺手把没在跑的旧的关掉，见 processMessage 的 newSession）。
+     *  （顶条那颗加号那条路会顺手把没在忙的旧的关掉，见 processMessage 的 newSession）。
      *  跑在哪个目录：跟这块屏现在看的会话走（顶条上那个会话在别的项目里，新会话也开在那个项目里）。
      *  一个会话都没有时（刚启动、刚把最后几个会话关完）用宿主自己的默认目录。
      *  @param spareDelayMs 备用进程预热的延迟毫秒数（启动路径传 SPARE_PREWARM_DELAY_MS）。
@@ -1058,6 +1073,9 @@ export abstract class ChatControllerBase implements RuntimeHost {
         if (this.autoJudgeRun.has(info.panelId)) { return; }   // 上一个判官还在（正常不会）：不叠着开
         const rt = this.panels.get(info.panelId);
         if (!rt) { return; }
+        // 这个收尾是异步送出的（要等最后一条回复的原文），等它到时人可能已经又发了一句、
+        // 下一轮已经开跑：那时候再叫判官就成了“两轮撞在一处”。
+        if (rt.streaming) { return; }
         // 后台还有命令在跑、或者派出去的子会话还有没跑完的：这一轮先不叫判官，也不往对话里写话。
         // 它们的结果本来就会当一条新消息交回这个会话，那一轮跑完再看要不要继续 —— 两边一起催，
         // 同一个会话就撞在一处了。
@@ -1195,29 +1213,6 @@ export abstract class ChatControllerBase implements RuntimeHost {
     /** 会话名里子会话名字最多占多长。 */
     private static readonly TABA_TAB_NAME_MAX = 28;
 
-
-    /**
-     * RuntimeHost.onBashTask：某个会话里的后台命令跑到头了（跑完 / 失败 / 被停）。
-     * 把结果当成一条新消息交回这个会话：按 steer 排队，会话正忙就在当前这轮工具跑完之后、
-     * 下一次请求模型之前投递（那条命令是它自己脱手出去的，等着这个结果），空闲时就是普通的新一轮。
-     */
-    public onBashTask(panelId: string, task: BashTaskInfo): void {
-        const rt = this.panels.get(panelId);
-        if (!rt) { return; }
-        const text = buildBashTaskDelivery({
-            no: task.no,
-            cmd: task.cmd,
-            status: task.status,
-            exitCode: task.exitCode,
-            elapsedMs: task.elapsedMs,
-            log: task.log,
-            tail: readBashLogTail(task.log, ChatControllerBase.BASH_DELIVERY_TAIL_BYTES),
-        }, this.getConfig().prompts);
-        rt.handleSend(text, undefined, { steer: true });
-    }
-
-    /** 交回会话时最多带多长一段输出（字节）：再长的让模型自己去 bash_tasks 取。 */
-    protected static readonly BASH_DELIVERY_TAIL_BYTES = 4000;
 
     /** RuntimeHost.onTabaRequest：某个会话里的 pi 扩展要派子会话 / 停子会话。 */
     public onTabaRequest(panelId: string, request: TabaRequest): void {
@@ -1636,6 +1631,35 @@ export abstract class ChatControllerBase implements RuntimeHost {
         }
     }
 
+    /**
+     * 这个会话要不要人管（见 sessionPhase.ts 的 attention）。
+     *
+     * 默认“不要”。知道“有一道题在等你答”的只有宿主那一层（问话卡片在它手里），
+     * 子类覆写它（见 chatHost 的 openCards；插件里那块对话面板跟浏览器页面走同一个后端，
+     * 所以那边也一并有了）。
+     */
+    protected sessionAttention(_panelId: string): SessionAttention { return ""; }
+
+    /**
+     * 告诉所有屏：这个会话的 phase / attention 变了。
+     *
+     * 只给“宿主独知”的那点事用（比如问话卡片弹出来 / 答完了）：阶段本身的变化由
+     * SessionRuntime 自己推（见 postPhase），不必走这里。
+     */
+    protected broadcastSessionPhase(panelId: string): void {
+        const rt = this.panels.get(panelId);
+        if (!rt) { return; }
+        const phase = rt.phase();
+        const msg = {
+            type: "phaseChanged",
+            sessionId: panelId,
+            phase,
+            busy: isBusyPhase(phase),
+            attention: this.sessionAttention(panelId),
+        };
+        this.forEachClient((_clientId, send) => send(msg));
+    }
+
     /** 一个会话 → webview 可渲染结构（附带显示状态与父子关系）。 */
     private serializeSession(rt: SessionRuntime): Record<string, unknown> {
         const child = this.taba.byChildPanel(rt.id);
@@ -1661,6 +1685,13 @@ export abstract class ChatControllerBase implements RuntimeHost {
             // 子会话挂在哪个会话下面（前端据此缩进）；不是子会话就是 null
             parentId: child?.parentPanelId ?? null,
             streaming: !!rt.streaming,
+            // 这个会话此刻处在哪个阶段（见 sessionPhase.ts）：界面只读这一个值，
+            // 不再各挑几个字段自己拼（压缩中、等你答这两档以前界面根本看不见）
+            phase: rt.phase(),
+            busy: isBusyPhase(rt.phase()),
+            compacting: !!rt.compacting,
+            // 要不要人管："" / "answer"（有题挂着等你答）/ "done"（跑完你还没看）
+            attention: this.sessionAttention(rt.id),
             // 后台还有命令在跑：这一轮答完了也算没干完（会话格、列表行首那颗点照旧蓝点呼吸）。
             bashRunning: rt.hasRunningBashTasks(),
             activity: rt.activity || "idle",
@@ -2052,10 +2083,18 @@ export abstract class ChatControllerBase implements RuntimeHost {
         this.dropPicker(target, false);
     }
 
-    /** 界面那头回了一条（选了 / 取消了）：把正在等的那一块屏放行。 */
-    protected resolvePicker(payload: any | undefined): void {
+    /**
+     * 界面那头回了一条（选了 / 取消了）：把正在等的那一块屏放行。
+     *
+     * @param fromKind 界面说它回的是哪一个浮层。对不上就不理：窄窗里收一份“项目与会话”的
+     *        推送时会顺手回一句 `pickerCancel kind:"workspace"`（见 media/chat.js 的
+     *        closePickerAnyway / renderPicker），以前这一句能把这块屏上正开着的别的浮层
+     *        （选模型、选文件夹）一并放掉 —— 模型选择器还摆在屏幕上，点下去却没人接。
+     */
+    protected resolvePicker(payload: any | undefined, fromKind?: string): void {
         const st = this.pickers.get(this.currentPageId);
         if (!st || !st.resolve) { return; }
+        if (fromKind !== undefined && fromKind !== st.kind) { return; }
         const r = st.resolve;
         const kind = st.kind;
         st.resolve = null;
@@ -2360,11 +2399,14 @@ export abstract class ChatControllerBase implements RuntimeHost {
             case "newSession": {
                 // 跟 pi 的 /new 一样：随手换一个干净的会话接着干，顶条上就留一格 ——
                 // 旧的那个关掉（它已经在盘上了，去「项目与会话」里的历史会话点得回来）。
-                // 例外：旧的那个还在跑（正在生成 / 跑工具），那就留着，不把没跑完的活掐掉。
+                // 例外：旧的那个还有活没干完，那就留着，不把没跑完的活掐掉。三种都算没干完：
+                // 这一轮正在生成 / 跑工具、后台还有命令在跑（那些命令跟着会话走，会话关掉就跑不下去了）、
+                // 派出去的子会话还在跑（关掉它，那些子会话就跟它断了，跑完的结果也交不回来）。
                 // 先建新的、再关旧的：新会话要继承旧会话的目录与模型，关早了就只剩宿主自己的默认目录了。
                 const old = this.getActive();
                 const rt = this.newSession();
-                if (old && old.id !== rt.id && !old.streaming && !old.hasRunningBashTasks()) {
+                if (old && old.id !== rt.id && !old.streaming && !old.hasRunningBashTasks()
+                    && !this.taba.hasRunningChildren(old.id)) {
                     this.closeSession(old.id);
                 }
                 return;
@@ -2395,10 +2437,10 @@ export abstract class ChatControllerBase implements RuntimeHost {
                 }
                 return;
             case "pickerChoice":
-                this.resolvePicker(msg.payload);
+                this.resolvePicker(msg.payload, typeof msg.kind === "string" ? msg.kind : undefined);
                 return;
             case "pickerCancel":
-                this.resolvePicker(undefined);
+                this.resolvePicker(undefined, typeof msg.kind === "string" ? msg.kind : undefined);
                 return;
             case "askCardAnswer":
                 // 界面上答了一张开在消息流里的问话卡片（见 ChatHost.askOnScreens）
@@ -2540,7 +2582,8 @@ export abstract class ChatControllerBase implements RuntimeHost {
             case "loadOlderHistory":
                 // 网页端顶部的「加载更早的消息」按钮：把当前窗口之前的一段补发过来。
                 // 只在开过历史窗口的会话上有意义；没开过窗口时运行时自己会忽略。
-                void target.loadOlderHistory();
+                // 图片预算按点这颗按钮的那块屏算（手机上仍旧只发占位）。
+                void target.loadOlderHistory(this.inlineImageBudget(this.currentPageId));
                 break;
             case "loadResultImage":
                 // 界面上点开一张"首屏没带过来"的图（见 sessionRuntime 的图片预算）：把那张单发回去。

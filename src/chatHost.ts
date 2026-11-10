@@ -24,7 +24,7 @@ import type { MessageSink } from "./sessionRuntime";
 import { ChatControllerBase, type ViewOptionItem, type WorkspacePage } from "./chatControllerBase";
 import { ServerStateStore } from "./serverState";
 import { DEFAULT_SERVER_CONFIG, readServerConfig, updateServerConfig, type ServerConfig } from "./serverConfig";
-import { isOwnPage, pushRemoteNotice, REMOTE_TEXT_CHARS, type RemoteNotice } from "./remoteNotice";
+import { isOwnPage, pushRemoteClose, pushRemoteNotice, REMOTE_TEXT_CHARS, type RemoteNotice } from "./remoteNotice";
 import { getAskAssets, getBashAssets, getEnvAssets, getImageAssets, getTabaAssets, getTitleAssets, getQueueAssets } from "./bridgeAssets";
 import { serverConfigFile, serverStateFile } from "./serverPaths";
 import {
@@ -38,10 +38,10 @@ import {
     renameHistorySession,
     type ProjectDirEntry,
 } from "./sessionStore";
-import { listDirectories } from "./dirBrowse";
+import { createSubdirectory, listDirectories } from "./dirBrowse";
 import { findFileContents, findFileNames, findPathCandidates } from "./fileSearch";
 import { ChatBroadcaster } from "./chatBroadcaster";
-import { displayName, machineName } from "./pageHtml";
+import { displayName, machineName, pageTitle } from "./pageHtml";
 import { MessageBuffer, PAGE_TRANSIENT_MESSAGE_TYPES } from "./webTransport";
 import { pickOverlayClient } from "./overlayTarget";
 import { ScreenRegistry } from "./screenRegistry";
@@ -55,6 +55,7 @@ import { DesktopLive } from "./desktopLive";
 import { DesktopNotice, openLocalFolder } from "./desktopNotice";
 import { describeRestart } from "./serverRestart";
 import type { SessionRuntime } from "./sessionRuntime";
+import type { SessionAttention } from "./sessionPhase";
 import { clipText } from "./messageUtils";
 import {
     DEFAULT_AUTO_LOAD_LAST,
@@ -172,6 +173,13 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
     private readonly pendingResyncPages = new Map<string, { note: string; full: boolean; lastRound: boolean }>();
     /** 正在整屏重画的页面：重画没画完页面就断了的话，得等它回来重新整画一遍（怎么画照旧）。 */
     private readonly resyncingPages = new Map<string, { lastRound: boolean }>();
+    /** 每块屏多宽（CSS 像素；页面连上来时写在连接地址上，见 webChatServer 的 openChannel）。
+     *  只在“首屏要不要把图一起发”这一件事上用：窄屏只发占位（见 inlineImageBudget）。 */
+    private readonly pageWidths = new Map<string, number>();
+    /** 屏宽不超过这么多（CSS 像素）就当手机：首屏只发图片占位，点开再取
+     *  （见 inlineImageBudget）。竖屏手机 360～430，平板 768 往上；横屏手机（800 多）按宽屏看待
+     *  —— 屏幕那么宽的时候图本来就装得下，也就不必为省流量把图拆开。 */
+    private static readonly PHONE_MAX_WIDTH = 640;
     /** 还等着的问话卡片：卡片编号（宿主自己发）→ 这一摊。 */
     private readonly openCards = new Map<string, OpenCard>();
     /** 卡片编号发到几了（界面上只拿它认领"哪张卡"、并把答案送回来）。 */
@@ -213,6 +221,15 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
     });
     /** 别的机器推来的卡片，标识前面挂这个（本机会话的标识就是会话号本身）。 */
     private static readonly REMOTE_NOTICE_PREFIX = "remote:";
+    /**
+     * 往别处推过“有事”的会话号 → 推的时候用的那个标签。
+     *
+     * 这些会话有事了、关掉了时还要再推一条“收掉”过去（那几台手上那张记的是
+     * “推方的标签 + 这边的会话号”，这边怎么动都碰不到它，见 closeNotice）。
+     * 标签要存推的那一刻的：那张卡片左上角挂的就是它，收的时候得用同一个 ——
+     * 中途在设置里改了标签，拿新的去收就永远对不上。
+     */
+    private readonly pushedNoticeSessions = new Map<string, string>();
 
     constructor(private readonly options: ChatHostOptions) {
         super("server");
@@ -376,6 +393,8 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      * 人最近在动的那一块屏。“最近”只看人做的动作，报活不算。
      */
     protected override pickOverlayTarget(): string {
+        // 挑人的两个来源都已经只认“通道还连着”的屏（见 chatBroadcaster 的
+        // recentActionPage / recentPage），断开的不可能被挑中，这里不用再过一道。
         return pickOverlayClient(this.broadcaster.recentActionPage(), this.broadcaster.recentPage()?.id);
     }
 
@@ -694,11 +713,14 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      *
      * 每一项都带一个图标名（icon），界面照名字在行首画一颗（见 media/chat.js 的 FOLDER_ROW_ICONS）：
      * "folder" 子目录、"up" 上一层（换一个盘也一样是往上走）、"check" 用这个目录。
+     * 这三样并不都摆成清单行：`up` 与「新建文件夹」（newFolder: true、没有图标）是顶上工具条那两颗，
+     * `check` 是底部那颗主按钮，清单里只剩 `folder`（见 media/chat.js 的 paintFolderChrome）。
      * 图标写在数据里、不在文字前面拼符号：符号在有的字体下对不齐，也没法按名字换。
      *
      * @param clientId 这个浮层是哪块屏开的（它自己收自己的回复）。
+     * @param problem 上一趟没办成的那件事（比如新建文件夹没建成）：写在标题里的那句原因。
      */
-    public async showFolderPicker(dir: string, clientId: string = this.currentPageId): Promise<void> {
+    public async showFolderPicker(dir: string, clientId: string = this.currentPageId, problem?: string): Promise<void> {
         const listing = await listDirectories(dir);
         // 判"这是盘符列表"只认空路径：dirBrowse 把盘根（D:\）也标成 roots，
         // 但那是个真目录（可以选它当项目目录，也是上一层能到的地方），不能跟盘符列表混为一谈。
@@ -713,6 +735,15 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
                 folderPath: listing.path,
                 icon: "check",
             });
+            // 新建文件夹：点这一行，界面在它底下就地摊一个输入框（不另开一层也不占别处），
+            // 名字敲好回车才发 `newFolder` 回来（见 createFolderThenPick）。
+            // 目录跟着这一行走（folderPath），界面不用去解析标题下面那行小字。
+            items.push({
+                label: "新建文件夹",
+                file: "",
+                folderPath: listing.path,
+                newFolder: true,
+            });
         }
         if (listing.parent) {
             items.push({ label: "上一层", file: listing.parent, icon: "up" });
@@ -724,13 +755,19 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             }
         }
         for (const d of listing.dirs) { items.push({ label: d.name, file: d.path, icon: "folder" }); }
+        // 这一层一个子目录都没有：清单里明说一句（上面那几件事现在画在工具条与底部，不在清单里，
+        // 这一格不说就是一片空白）。盘符那一层不算（它不是“某个目录里有什么”）。
+        if (!driveList && listing.dirs.length === 0) {
+            items.push({ label: "（这里没有子文件夹）", file: "" });
+        }
         if (items.length === 0) { items.push({ label: "（这里没有子文件夹）", file: "" }); }
         // 列不出来的原因（没权限、目录没了）写进标题里，人一眼知道为什么是空的。
         // 正在看的目录写在标题下面那行小字（subtitle）里：标题只报“在干啥”，
         // 路径再长也不会把标题顶成两行。
         const title = driveList
             ? "选择盘"
-            : (listing.error ? `选择文件夹（${listing.error}）` : "选择文件夹");
+            : (problem ? `新建文件夹（${problem}）`
+                : (listing.error ? `选择文件夹（${listing.error}）` : "选择文件夹"));
         // 盘符列表没有路径可报，写一句“此电脑”——跟 Windows 资源管理器里那一层的叫法一致。
         const subtitle = driveList ? "此电脑" : listing.path;
         // 不给筛选框：一层目录就几行，用上下键挑名字比打字快，框还占一截地方。
@@ -745,6 +782,24 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             return;
         }
         await this.showFolderPicker(choice.file, clientId);
+    }
+
+    /**
+     * 「选择文件夹」那一层里新建一个目录（界面发来 `newFolder`：名字是在那一行里现敲的）。
+     *
+     * 建好就进到那个新目录里去：人建它多半就是要拿它当工作目录，进去以后第一行就是
+     * 「就用这个目录」。没建成（重名、名字不能用、没权限）就还留在原处、把原因写在标题上，
+     * 人再点一次那一行重敲。两条路都重新列一遍（跟点一个目录进去一样：浮层收掉再开一份新的）。
+     */
+    private async createFolderThenPick(msg: any, clientId: string): Promise<void> {
+        const parent = typeof msg.path === "string" ? msg.path : "";
+        const name = typeof msg.name === "string" ? msg.name : "";
+        const made = await createSubdirectory(parent, name);
+        if (!made.path) {
+            await this.showFolderPicker(parent, clientId, made.error);
+            return;
+        }
+        await this.showFolderPicker(made.path, clientId);
     }
 
     // ========================================================================
@@ -807,25 +862,39 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
 
     /**
      * 弹一张提醒卡片。
-     * 左上角那颗小标签写的是设置里那项「标签」（空着就是电脑名）：一眼看出这张是这台弹的。
+     * 左上角那颗小标签默认写设置里那项「标签」（空着就是电脑名）：一眼看出这张是这台弹的。
+     * @param tag 换个标签写（别的机器推来的那张写来源那台，见 acceptRemoteNotice）
      */
-    private showNotice(key: string, title: string, body: string, ask: boolean): void {
-        this.notice.show(key, title, body, ask, displayName());
+    private showNotice(key: string, title: string, body: string, ask: boolean, tag = displayName()): void {
+        this.notice.show(key, title, body, ask, tag);
     }
 
     /** 收走某个会话那一张卡片（它说上话了、被关掉了、那道题答完了）。 */
     private closeNotice(key: string): void {
         this.notice.close(key);
+        // 推给别处的那几台也收掉：它们那张记的是“别台的标签 + 这边的会话号”，
+        // 这边这几件动作碰不到它，只能推一条“收掉”过去（见 remoteNotice 的 pushRemoteClose）。
+        // 标签用推的时候那个（存着的），不能用现在的：中途改过设置里的标签就对不上了。
+        if (key.startsWith(ChatHost.REMOTE_NOTICE_PREFIX)) { return; }
+        const label = this.pushedNoticeSessions.get(key);
+        if (label === undefined) { return; }
+        this.pushedNoticeSessions.delete(key);
+        for (const target of this.remoteTargets()) { void pushRemoteClose(target, label, key); }
     }
 
     /**
-     * 人点了卡片：叫连着的网页切到那个会话。
+     * 人点了卡片：叫连着的网页切到那个会话，并把开着那个页面的窗口提到前面。
      *
-     * 只切会话：不去把浏览器窗口提到前面，也不新开浏览器。网页没开着、或者这张是别的机器推来的
-     * （本机页面上认不出它的会话号），就只是把这张收掉（notice.exe 自己会收）。
+     * 提窗口那件事交给画卡片的小程序去干（Node 这边没有调 Windows 接口的路子）：
+     * 按页面标题找（拼法只有 pageHtml.pageTitle 一份，网页标题、安装成应用那个窗口的标题都是它）。
+     * 找得到才提，找不到就光是把这张收掉（notice.exe 自己会收）、切会话照旧发生：
+     * 页面没开着、页面只停在浏览器的背景 tab 里（那种窗口的标题跟着活动 tab 走，认不出来）、
+     * 只在插件的对话面板里开着——这几种都不提。也不新开浏览器。
+     * 别的机器推来的那张（本机页面上认不出它的会话号）就只是收掉。
      */
     private openNotice(key: string): void {
         if (key.startsWith(ChatHost.REMOTE_NOTICE_PREFIX)) { return; }
+        this.notice.raise(pageTitle());
         this.forEachClient((_clientId, send) => {
             send({ type: "switchToSession", sessionId: key });
         });
@@ -867,8 +936,14 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      * 一条推送连接建立（页面连上 / 重连）：把等着的重画补上、把断线期间漏掉的消息接着发，
      * 再把攒着的消息冲出去。
      * @param since 页面在连接地址上报的「我处理到第几条」；刚打开的页面不报。
+     * @param width 页面在连接地址上报的屏宽；旧页面 / 别的东西来连时没有。
      */
-    public onPageConnected(pageId: string, since?: number): void {
+    public onPageConnected(pageId: string, since?: number, width?: number): void {
+        if (typeof width === "number" && width > 0) { this.pageWidths.set(pageId, width); }
+        // 断线前屏幕上还开着的浮层：后端在断开那一刻已经按取消放行过了（见 dropPickerForClient），
+        // 界面上那一块却还摆着，点下去没人接（看着就是“点了没反应”）。重连第一件事让它收起来。
+        // 没开着的时候这一句什么也不做（界面上 hidePicker 对一份空状态直接返回）。
+        this.sendToOneClient(pageId, { type: "pickerCancel" });
         // 这条连接是新的，旧那条上"卡片已送到"的记录不再作数：手机锁屏之后旧连接常常是
         // 悄悄死的（网络那头把会话收了，浏览器不报错），卡片写进去看着成功、对方其实没收到；
         // 页面重开一条连接回来时，这边也没法知道它手里到底有哪几张卡片。
@@ -910,6 +985,7 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
     /** 一条推送连接断了（页面关掉 / 死连接被掐掉）：它上面等着的问话卡片摘掉，
      *  它上面开着的浮层也按取消收掉（等的人不用干等）。 */
     public onPageDisconnected(pageId: string): void {
+        this.pageWidths.delete(pageId);
         this.dropCardsForClient(pageId);
         this.dropPickerForClient(pageId);
         // 这块屏还在看桌面实时画面的话，它这一走就别再拍了
@@ -1012,7 +1088,8 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         for (const rt of this.panels.values()) {
             // 刚建的空会话不用重画：newSession 已经把它需要的东西发过去了
             if (rt.isConversationEmpty()) { continue; }
-            replays.push(rt.replayHistory({ note, sink, full: opts?.fullHistory, lastRound: opts?.lastRound }));
+            replays.push(rt.replayHistory({ note, sink, full: opts?.fullHistory, lastRound: opts?.lastRound,
+                imageBudget: this.inlineImageBudget(pageId) }));
         }
         return Promise.all(replays).then(() => {
             // 重画把还等着的问话卡片也抹掉了：重发给这块屏（见 resendCardsTo）
@@ -1030,10 +1107,23 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         });
     }
 
+    /**
+     * 这块屏首屏的图片预算（base64 字符数）：undefined = 用运行时默认那一份（400 KB）。
+     *
+     * 只有“这块屏是手机”（屏宽不超过 PHONE_MAX_WIDTH）时给 0：首屏里的图一张都不带，
+     * 界面上只摆占位，点开再取（见 sessionRuntime 的 planInlineImages / loadResultImage）。
+     * 图片的 base64 是整份首屏里唯一几乎压不动的东西，手机走流量时这一笔最疼。
+     * 别的屏（电脑上的浏览器窗口、插件里那块面板）不受影响。
+     */
+    public override inlineImageBudget(pageId: string): number | undefined {
+        const width = pageId ? this.pageWidths.get(pageId) : undefined;
+        if (typeof width !== "number") { return undefined; }   // 没报屏宽（旧页面 / 别的东西连的）：当宽屏
+        return width <= ChatHost.PHONE_MAX_WIDTH ? 0 : undefined;
+    }
+
     // ========================================================================
     //  名字池 / # 引用目录
     // ========================================================================
-
     public allocateChatName(): NameParts {
         const parts = uniqueNameParts(this.usedChatNames);
         this.usedChatNames.add(composeName(parts));
@@ -1197,6 +1287,10 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             }
         } else if (action === "machineLabel") {
             updateServerConfig({ label: String(value ?? "").trim() });
+        } else if (action === "notifyTurnEnd") {
+            // 这一行以前没接住，落到最后那个 else 去了：点「弹窗通知」实际拨的是
+            // 「启动时自动打开最近会话」，通知却一直是开的。
+            this.writeOption(ChatHost.KEY_NOTIFY_TURN_END, !this.getNotifyTurnEnd());
         } else if (action === "notifyPushTo") {
             // 填的是给人看的写法：逗号 / 空格 / 换行都算分隔；没写 http:// 的补上，
             // 没写端口的补上 Pi Chat 出厂那个（51883）——否则按 http 的默认端口 80 算，打不通。
@@ -1217,6 +1311,9 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         } else {
             this.writeOption(ChatHost.KEY_AUTO_LOAD_LAST, !this.getAutoLoadLast());
         }
+        // 「弹窗通知」关掉了：屏幕上已经弹着的几张也收掉。
+        //（以前关掉只管下一张，已经弹着的得等人自己点；卡片本来就不会到点自己消失。）
+        if (!this.getNotifyTurnEnd()) { this.notice.closeAll(); }
     }
 
     // ========================================================================
@@ -1487,6 +1584,10 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
                 // 工作区那块的「加载更多」：再送一批（一次 4 个）。
                 // dock = 点它的那颗在不在常驻那一列（掉了就照原样重摊一份）。
                 void this.loadMoreWorkspaces(msg.dock === true);
+                return true;
+            case "newFolder":
+                // 「选择文件夹」那一层里新建一个目录：名字在那一行里现敲，目录（path）也跟着那一行。
+                void this.createFolderThenPick(msg, this.currentPageId);
                 return true;
             case "newSessionInWorkspace":
                 // 工作区那一行行尾的加号：就在那一行的目录里开新会话。
@@ -1769,6 +1870,9 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             if (waitMs > 0) { state.timer = setTimeout(() => { this.settleCard(id, undefined); }, waitMs); }
             if (sessionId) {
                 for (const target of this.clientsViewing(sessionId)) { this.sendCardToScreen(id, state, target); }
+                // 这道题一挂上来，这个会话就进入“等你答”那一档（见 sessionPhase.ts 的 attention）：
+                // 顶条那颗点、会话列表那一行跟着变，不用靠右下角那张卡片才发现
+                this.broadcastSessionPhase(sessionId);
             }
         });
     }
@@ -1795,8 +1899,11 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         state.settled = true;
         if (state.timer) { clearTimeout(state.timer); state.timer = undefined; }
         this.openCards.delete(id);
-        // 这道题有眉目了（答了 / 没得答了）：那个会话的提醒也跟着收走
-        if (state.sessionId) { this.closeNotice(state.sessionId); }
+        // 这道题有眉目了（答了 / 没得答了）：那个会话的提醒跟着收走，“等你答”那一档也跟着退掉
+        if (state.sessionId) {
+            this.closeNotice(state.sessionId);
+            this.broadcastSessionPhase(state.sessionId);
+        }
         for (const target of Array.from(state.screens)) {
             this.sendOverlayTo(target, { type: "askCardDone", id, answer: answer ?? null });
         }
@@ -1815,6 +1922,30 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
             yes: msg.yes === true,
             cancelled: msg.cancelled === true,
         });
+    }
+
+    /**
+     * 这块屏现在还连着吗：推送通道还在才算。
+     *
+     * “谁在看哪个会话”那本登记簿只登记不销号（页面断开不会忘了它，因为同一个标识重连回来
+     * 还要接着看原来那个），所以“有人看着这个会话”必须再问一句“那条通道还在不在”——
+     * 不然关掉的标签页会一直算“有人看着”，确认框白白等两分钟才走兜底。
+     */
+    protected override isClientLive(clientId: string): boolean {
+        return !!this.broadcaster.getChannel(clientId);
+    }
+
+    /**
+     * 这个会话要不要人管：有一张问话卡片挂着（还没收尾）就是“等你答”。
+     *
+     * 这是宿主才有的知识（卡片在它手里），所以由这一层回答；阶段本身（进程在干什么）
+     * 在 SessionRuntime 里算，见 sessionPhase.ts。
+     */
+    protected override sessionAttention(panelId: string): SessionAttention {
+        for (const state of this.openCards.values()) {
+            if (!state.settled && state.sessionId === panelId) { return "answer"; }
+        }
+        return "";
     }
 
     /**
@@ -1887,12 +2018,9 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      * @returns 推给了别处没有（推了这台就不自己弹：一个人只盯得了一台机器）
      */
     protected override pushRemoteNote(sessionId: string, name: string, summary = "", kind: "done" | "ask" = "done"): boolean {
-        const notify = readServerConfig().config.notify;
         const base = this.options.selfPageUrl?.();
-        if (!base) { return false; }
-        // 填的是这台自己的地址（面板上默认就显示它）等于“提醒还在这台”：不推给自己，本机自己弹
-        const targets = notify.pushTo.filter((target) => !isOwnPage(target, base));
-        if (targets.length === 0) { return false; }
+        const targets = this.remoteTargets();
+        if (!base || targets.length === 0) { return false; }
         const notice = {
             // 那边卡片上写的就是这台的「标签」
             label: displayName(),
@@ -1907,7 +2035,19 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         for (const target of targets) {
             void pushRemoteNotice(target, notice);
         }
+        // 记着这个会话：它有事了、关掉了时，这几台上那张还得再推一条“收掉”（标签也存这时候的）
+        this.pushedNoticeSessions.set(sessionId, notice.label);
         return true;
+    }
+
+    /**
+     * 设置里「消息推送」填的那几台（去掉这台自己的地址）。
+     * 填的是本机地址（设置面板上默认就显示它）等于“提醒还在这台”：不推给自己。
+     */
+    private remoteTargets(): string[] {
+        const base = this.options.selfPageUrl?.();
+        if (!base) { return []; }
+        return readServerConfig().config.notify.pushTo.filter((target) => !isOwnPage(target, base));
     }
 
     /**
@@ -1916,9 +2056,16 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      * 在这台照弹一张（人不会只坐一台前面）；点它只是把卡片收掉，本机管不着那台的会话。
      */
     public acceptRemoteNotice(notice: RemoteNotice): void {
-        if (!this.notifyTurnEndEnabled()) { return; }
         const key = ChatHost.REMOTE_NOTICE_PREFIX + notice.label + ":" + notice.sessionId;
-        this.showNotice(key, notice.label + " · " + notice.name, notice.text ?? "", notice.kind === "ask");
+        // 那边已经有人说话了 / 会话关掉了 / 那道题答完了：把这张收掉（本机没有那个会话，别的动作碰不到它）
+        if (notice.close) {
+            this.notice.close(key);
+            this.log(`[提醒] 收了一张（别的机器说那边没事了）：${notice.label} · ${notice.name}`);
+            return;
+        }
+        if (!this.notifyTurnEndEnabled()) { return; }
+        // 标签写来源那台（家里），标题就只是那个会话的名字：标签与标题各说一件事，不重复
+        this.showNotice(key, notice.name, notice.text ?? "", notice.kind === "ask", notice.label);
         this.log(`[提醒] 弹了一张（别的机器推来的）：${notice.label} · ${notice.name}`);
     }
 
@@ -1989,6 +2136,7 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         this.disposed = true;
         this.desktopLive.stop();
         this.notice.dispose();
+        this.pushedNoticeSessions.clear();
         this.disposeAllPickers();
         this.disposeAllCards();
         this.disposeAllConversations();

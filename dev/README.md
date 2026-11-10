@@ -49,6 +49,10 @@ npm run web:shot -- --headed --keep
 # 动作复杂时写个脚本：module.exports = async (page) => { … }
 npm run web:shot -- --script dev/myFlow.js
 
+# 验 bash 的 notifyOutput（不调用真模型）：排队期间更新、结束升级、已读不改、清理，
+# 并用真 SDK + 假生成检查模型收到的内容、公开事件、页面和历史一致，用户文字/图片不变：
+npm run compile && node dev/bashOutput.js
+
 # 用假模型验界面：不调真模型，按剧本秒回（会话/历史/重放全真，只是“模型”是假的）
 # 剧本在 dev/fakePi.js 顶部，读了哪个文件、调了哪些工具都能改
 npm run web:dev -- --fake-pi
@@ -98,13 +102,16 @@ node dev/desktopLive.js
 # 猜出来的页面标识两条地址都不给：
 node dev/liveDrop.js
 
-# 验「正在跑的那一条」（工具标签下面那行摘要：在跑的那条把命令 / 读哪个文件直接写出来，
-# 同时跑几条也只露最近开始的那一条（一条跑完这一块高矮不变、下文不跟着跳），
+# 验「正在跑的那一条」（工具标签下面那一块：在跑的那条把命令 / 读哪个文件直接写出来，
+# 整条命令切成几段摆成一条链（一句不藏，heredoc 的正文也拼在那一步里），只读的几段字淡、
+# 会改东西的（rm / 写文件 / 跑构建）正常深浅；命令一步一行（有分隔符就换行，分隔符留在行尾，第二行起跟
+# 第一行「$ 」后面那个字对齐），一步太长就在行尾省掉（不折行）；超过五步的那几步收成 +N；一大块内联脚本那种参数
+# 折成「…（省 N 字）…」（两头留着，看得出用什么跑、往哪写）；点开那一行看整条；
+# 同时跑几条也只露最近开始的那一条（一小段快调用连着来，下面不跟着一跳一跳），
 # 一条都不在跑就冻住（齿轮停转、耗时定住），字一直留着；
 # 新的命令来了原地顶掉，下面出正文 / 铺进问话卡片 / 这一轮跑完才整条收掉，
 # 一串 60 毫秒跑完的调用连着来也不该一闪一闪，think 与 ask_choice 不出这条，
-# 一行放不下的长命令字自己慢慢横向滚、只往一个方向（到头停一下从头来，不看末尾就白滚了；冻住的也滚），
-# 放得下的那条一动不动，每条末尾钉一个往上走的耗时（字滚它不滚、冻住后不再变、重放的老调用不写））：
+# 每条末尾钉一个往上走的耗时（字折行它不动、冻住后不再变、重放的老调用不写））：
 npm run web:shot -- --width 900 --height 620 --script dev/runningLine.js
 
 # 验「结果永远不会回来的工具调用」（那一轮跑到一半被中断 / pi 进程没了）：
@@ -150,7 +157,7 @@ npm run web:shot -- --fake-pi --width 1000 --height 1000 --script dev/msgTime.js
 npm run web:shot -- --fake-pi --theme dark --width 420 --height 1000 --script dev/msgTime.js
 
 # 验消息流末尾那一块「后台任务」（没命令在跑时没有那一块；有命令在跑时一条一行、长成「正在跑的那一条」
-# 那样：钟 + 编号 + 命令 + 停 + 用时，命令只写核心那一段、后面灰一个 +N，点开那一行看整条，
+# 那样：钟 + 编号 + 命令 + 停 + 用时，命令整条摆成一条链（一句不藏）、太长就前五段 +N，点开那一行看整条，
 # 放不下的字自己横向滚；新的在前、跑完的不列，钟那根针在走、用时自己往上走，
 # 点「停」那颗先灰掉、后端推一条跑完就当场收掉、跑光了整块收掉；
 # 有了对话以后仍旧排在所有消息后面、末尾那颗胶囊前面（新消息来了也还是这样）；手机上不出屏）：
@@ -425,7 +432,13 @@ SIDEBAR_BATCHES=40 SIDEBAR_ROUNDS=5 npm run web:shot -- --script dev/sidebarPerf
 | `visit.js` | `npm run web:shot` 的入口：按动作跑一遍并截图 |
 | `focusCheck.js` | 验“每块屏各看各的会话”（两块浏览页面 + 模拟的 VSCode 窗口）：`node dev/focusCheck.js` |
 | `trustedOrigin.js` | 验“页面是从 https 反代的地址打开的”（设置里 `webServer.trustedOrigins` 写下的来源放行、别人的照旧 403、反代后面页面照常收发、现签证书 + 本机起一个 https 反代来跑）：`node dev/trustedOrigin.js` |
+| `closeSessionFiles.js` | 验「会话没了，长在它身上的那两块跟着收起来」：开着看文件的弹窗时把会话关掉（别的窗口关的、或自己点的叉），弹窗跟着收 —— 不收的话屏幕上留着一份点不动的它，尤其那份 diff 横条上的「回滚」：那个会话在后端已经不在了，点下去没人接：`npm run web:shot -- --fake-pi --script dev/closeSessionFiles.js` |
+| `escPriority.js` | 验「Esc 归谁」那张表（现在只有 media/chat.js 的 escTopLayer 一处写）：设置面板开着时 Esc 只收设置、工具耗时 / 工具两个弹窗开着时 Esc 只收弹窗（这两个以前会顺手中止正在跑的那一轮），文件搜索叠在浮层上时第一下收搜索、第二下收浮层，什么也没开着时照旧中止这一轮：`FAKEPI_THINK_MS=5000 npm run web:shot -- --fake-pi --width 1200 --height 800 --script dev/escPriority.js` |
+| `stateApply.js` | 验页面上那份会话状态更新时的三条正经路（都是“只有一个入口”的事）：会话列表说“在跑”时要跟“这一轮开始”走同一个入口、把上一轮那颗绿点清掉；补完更早的历史以后“这是老消息”的标记要复位（不然之后新长出来的工具调用被当成老消息，「正在跑的那一条」末尾不写耗时）；关掉一个还挂着「后台任务」的会话，它那只每半秒走一次的钟要跟着停（以前没清，一直空转）：`npm run web:shot -- --fake-pi --script dev/stateApply.js` |
+| `pickerStray.js` | 验浮层在两件“没人应答”的事上不再各说各话：窄窗里收一份「项目与会话」推送时界面会顺手回一句 `pickerCancel kind:"workspace"`，以前它能把这块屏上正开着的**别的**浮层（模型选择器）一并放掉 —— 选择器还摆着、点下去没人接；现在回复要对得上它自己开的那一个。另一件：断线时后端把浮层按取消放行（不然等的人干等 120 秒），界面上那块还摆着，重连时后端说一句它才真的收：`node dev/pickerStray.js` |
+| `noticeMirror.js` | 验右下角那张提醒卡片在后端的这一份账：收一张“屏幕上本来就没有”的卡不许把已经退了的小程序再拉起来；收卡时推给别台的“收掉”要用**推的那一刻**的标签（中途改了设置里的标签也收得掉）；小程序自己收掉一张（三张挤掉最老；点叉得人去点，脚本点不了）要回报给后端，那份镜像跟着删。真起后端、真弹卡片（要 Windows + bin/notice.exe）：`node dev/noticeMirror.js` |
 | `reconnect.js` | 验断线重连（冻住 / 断网 / 反复锁屏 / 反复弄断连接 / 断线期间问的选择题 / 补不上时整屏重画只发最后一轮）：`node dev/reconnect.js` |
+| `deadScreen.js` | 验「谁在看这个会话」那一条：已经走掉的屏（标签页关了、页面离开了）不算在看 —— 页面还开着时 `clientsViewing` 里有它，离开以后立刻没了；问一句“要不要”当场按“否”回来，而不是让确认框白等满 2 分钟。走的是真后端后端与真页面（推送通道断开那一下）：`node dev/deadScreen.js` |
 | `mermaidCheck.js` | 验消息流里的 ```mermaid 画成图（各种图都出图、写坏的留代码块加一行说明、画图那个脚本出现图才去拉、中文节点名不被吞、换深色不重画就跟着变、面板那一份也画得出、页面不报错）：`node dev/mermaidCheck.js` |
 | `mermaidFileCheck.js` | 验文件侧边栏里那份 markdown 文档里的 mermaid（同一个播放器，换个地方；甘特图也画得出、写坏的留说明）：`node dev/mermaidFileCheck.js` |
 | `lazyScripts.js` | 验画图的 pele（700 多 KB）没排进首屏（浏览器页面按需加载、地址写在 meta 里带着指纹；面板仍然内联）：`node dev/lazyScripts.js` |
@@ -440,10 +453,10 @@ SIDEBAR_BATCHES=40 SIDEBAR_ROUNDS=5 npm run web:shot -- --script dev/sidebarPerf
 | `thinkRow.js` | 验模型的思考显示成工具行里的 `think` 标签（当场生成 + 刷新重放 + 同批两段合并 + 正文之后补来的那段跑完并回本段那颗；正在想时那颗齿轮在转、想完停住；提示框里点开那一行才看思考正文）：`npm run web:shot -- --fake-pi --script dev/thinkRow.js` |
 | `thinkTipPerf.js` | 验 `think` 提示框开着、思考那一条点开时边流边长的开销与表现（节流、跟着贴底、往回滚就不跟）：`npm run web:shot -- --fake-pi --script dev/thinkTipPerf.js` |
 | `endHint.js` | 验消息流末尾那颗胶囊（空会话不露面、跑完在末尾露面且脸是「继续」、点它发一条“继续”、打的字留着、生成中换成「卡住了」且跟得住末尾、点「卡住了」这一轮当场停住并补发一条“卡住了”、再跑完回到末尾、页面重开（含生成中重开）后还在末尾、最左边那颗关会话的叉只在闲着时露面且点了会话就关掉）：`FAKEPI_THINK_MS=2500 npm run web:shot -- --fake-pi --script dev/endHint.js` |
-| `bashTasks.js` | 验消息流末尾那一块「后台任务」（一条都没在跑时没有那一块；有命令在跑时一条一行、跟「正在跑的那一条」一个样子：钟 + 编号 + 命令 + 停 + 用时，命令只写核心那一段、后面灰一个 +N、点开那一行看整条，放不下的字自己横向滚；新的在前、跑完的不列；钟那根针在走、用时自己往上走；点「停」那颗先灰掉，后端推一条跑完就当场收掉、跑光了整块收掉；有了对话以后仍排在所有消息后面、末尾那颗胶囊前面，来了新消息也一样；手机上不出屏；假数据，不叫模型）：`npm run web:shot -- --width 900 --height 700 --script dev/bashTasks.js` |
+| `bashTasks.js` | 验消息流末尾那一块「后台任务」（一条都没在跑时没有那一块；有命令在跑时一条一行、跟「正在跑的那一条」一个样子：钟 + 编号 + 命令 + 停 + 用时，命令整条摆成一条链（一句不藏）、一步一行（有分隔符就换行，分隔符留在行尾；一步太长就在行尾省掉，超过五步的收成 +N）、点开那一行看整条；新的在前、跑完的不列；钟那根针在走、用时自己往上走；点「停」那颗先灰掉，后端推一条跑完就当场收掉、跑光了整块收掉；有了对话以后仍排在所有消息后面、末尾那颗胶囊前面，来了新消息也一样；手机上不出屏；假数据，不叫模型）：`npm run web:shot -- --width 900 --height 700 --script dev/bashTasks.js` |
 | `desktopLive.js` | 验「按住截图按钮不放，看这台电脑的桌面实时画面」（真按住、真起那支一直拍桌面的小程序、真把帧画到页面上：按住时按钮当场给反应（压暗 + 一圈进度按着住的时长转），不到时间松手算点一下、转满才弹那一层；画面一直在换、松手后还在；两块屏一起看只起一支小程序、关掉一块还在拍、全关了才停；点黑底 / 点叉 / Esc 都能收起；只能在 Windows 上跑）：`node dev/desktopLive.js` |
 | `msgTime.js` | 验回答下方时间行（假数据，不向模型发消息）：常显、居中独占行、同轮只显示末段时间、今天带「今天」/ 别的日子补日期 / 跨年写全年、悬停完整时间、缺失时间兜底、原位重画和历史对账、不混入正文复制内容。 |
-| `firstLoad.js` | 量“手机上第一次打开”到底下了多少字节、花了多久：把一个真会话文件装进调试后端，用全新浏览器打开页面，按 URL 与消息类型列字节账，报“从点开到能打字 / 到历史画完”：`node dev/firstLoad.js --session <某个 .jsonl> --cpu 4`（4 ≈ 手机的 CPU 档位） |
+| `firstLoad.js` | 量“手机上第一次打开”到底下了多少字节、花了多久：把一个真会话文件装进调试后端，用全新浏览器打开页面，按 URL 与消息类型列字节账，报“从点开到能打字 / 到历史画完”：`node dev/firstLoad.js --session <某个 .jsonl> --cpu 4`（4 ≈ 手机的 CPU 档位）；`--net 4g`（| `fast3g` / `slow3g`）把网速也限成手机那样，`--warm` 量“浏览器已经有缓存、第二次以后打开”（不给 `--net` 时走本机 loopback：字节是真的，秒数只算 CPU） |
 | `liveDetail.js` | 验“实时流里思考 / 工具内容一个字都不发”：假模型把思考与 bash 输出撑长（`FAKEPI_LONG=3000`），这一轮推过去的思考增量是 0 字，点开只画那一行调用（一个字都不取），点开那一行才写上「还有 N 字没带过来，正在取…」、一会儿换成全文；调用参数只带那行摘要（`$ ls` 一直看得见），write 的写入预览要点开才来：`FAKEPI_LONG=3000 npm run web:shot -- --fake-pi --script dev/liveDetail.js` |
 | `detailOnDemand.js` | 同上那条路的另一半（历史重放）：用真会话打开页面，标签上只有工具名、点开只画输入、再点那一行才把全文取回来：`node dev/detailOnDemand.js --session <某个 .jsonl>` |
 | `thinkDetail.js` | 验 `think` 点开不是空的（三种会变成「（没有输出）」的情形）：想一半点「停止生成」后已经想到的那段还在；思考的收尾比正文晚到（真 pi 的 openai-completions 适配器就这样，假模型用 `FAKEPI_LATE_THINK_END=1` 演）时只出一颗标签、点开是全文；模型只给加密内容（一个字都没有）时写「（这段思考没有文字）」：`FAKEPI_LATE_THINK_END=1 FAKEPI_LONG=1500 FAKEPI_TICK_MS=25 npm run web:shot -- --fake-pi --script dev/thinkDetail.js` |
@@ -455,6 +468,7 @@ SIDEBAR_BATCHES=40 SIDEBAR_ROUNDS=5 npm run web:shot -- --script dev/sidebarPerf
 | `closeShortcut.js` | 验「关闭会话」快捷键（设置里那一行默认 `Alt+W`；对已经跑完的会话真按一下就关掉正在看的那个并切到剩下的；焦点在输入框里按也照样关）：`npm run web:shot -- --fake-pi --width 900 --height 800 --script dev/closeShortcut.js` |
 | `sessionMenuClose.js` | 验关会话的二次确认（只对正在跑的会话）：顶条上那一格点 × → 那一格变红、叉换成勾（不真关），再点一下才关；在跑时按 `Alt+W` 同样落在那一格上；「项目与会话」里「正在对话」那几行点叉先出确认条（整行变红、行尾一颗勾一颗叉），点叉撤销、干等 4 秒撤销、点勾真关、点行身也算撤销：`FAKEPI_THINK_MS=5000 npm run web:shot -- --fake-pi --width 900 --height 800 --script dev/sessionMenuClose.js` |
 | `workspacePanel.js` | 验「项目与会话」面板（那颗 `<<<`）：正在对话一段、工作区那块的展开 / 收起（含记住）、组里的「加载更多」、行尾加号新建会话、标题右边那颗加号、子会话不显示：`npm run web:shot -- --width 1200 --height 760 --fake-pi --script dev/workspacePanel.js` |
+| `newFolder.js` | 验「选择文件夹」那一层及其中的「新建文件夹」（在磁盘上真建出目录来，所以只往 `dev/.scratch` 里建、跑完删掉）：清单里只剩目录（往回走与新建不在清单里）、顶上那条工具条（↑ / ＋新建文件夹）、底部「取消 / 就在这里新建会话」、路径那条线与工具条那条只有一条；点新建就地摊输入框、Esc 只收这个框、空着回车什么也不发、建成后直接进到新目录里、点 ↑ 退回上一层看得到刚建的、重名与带斜杠的建不成（原因写在标题上）、底部那颗主按钮真在那个目录里开出一个会话来：`npm run web:shot -- --fake-pi --script dev/newFolder.js` |
 | `wsGroupRefresh.js` | 验「会话文件一变，那个工作区的历史会话就跟着变」（关掉一个会话 / 新会话头一回落盘之后，那一组不用重开面板就重扫一遍；目录清单在 `sessionStore` 里留 5 秒，靠的就是这一下把它丢掉 —— 这里看得见的结果正好验了那条路；假 pi 报的会话文件不在 pi 的会话目录里，脚本自己手写一份塞进去）：`npm run web:shot -- --fake-pi --cwd dev/.scratch/ws-group --width 1100 --height 800 --script dev/wsGroupRefresh.js` |
 | `sidebarDock.js` | 验宽窗下常驻的项目与会话侧边栏（`<<<`，窗口 ≥ 900px 才常驻）：打开 / 收起 / 记住收起 / 收起时里头那份留着（再展开第一帧就有内容，不用等宿主扫磁盘）/ 两根顶线对齐 / 底部那条线与输入区上边线齐（输入框长高时线往上走、设置那颗按钮不动）/ 点行不关面板 / 开别的浮层时那一列原样留着 / 工作区那两块「加载更多」/ 改窄再拉宽（窄窗那一块得贴着右边、整屏高，不是居中的弹窗；居中那几块得还在正中），一次过一遍：`npm run web:shot -- --width 1200 --height 760 --fake-pi --script dev/sidebarDock.js` |
 | `sidebarRedraw.js` | 验对话更新时常驻那一列的重画范围（只该动「正在对话」那一格）：整块有没有重画、下半那一格的元素与滚动有没有动、重画过后点行还准不准：`FAKEPI_TICK_MS=60 npm run web:shot -- --width 1200 --height 760 --fake-pi --script dev/sidebarRedraw.js` |
@@ -463,6 +477,8 @@ SIDEBAR_BATCHES=40 SIDEBAR_ROUNDS=5 npm run web:shot -- --script dev/sidebarPerf
 | `tabSwitchStale.js` | 验「切会话那几条确认过期了，画面不能被它拽回去」（两个都是手比回话快才撞得出来的，脚本把后端办 `switchSession` 那一步压后，跟真机上网络慢一个意思）：连按两下切换，画面直接到第二格、不在第一格停一下再过去；切换请求还在路上时推送连接重开（后端把“它记着的那个”再说一遍），画面不跳回原来那一格，并且把自己的选择再报给后端一遍。去掉这两道“只认最新这一下”的检查，脚本两条都会红：`npm run web:shot -- --fake-pi --script dev/tabSwitchStale.js` |
 | `multiSessionPerf.js` | 量「同时有好几个会话在跑」时界面吃多少 CPU（屏幕上只有一个，其余几个的字照样在回来）：几个会话一起投流式内容，报主线程忙（拆成脚本 / 排版 / 算样式），可以 `--switch-every 2000` 一边吐字一边切 tab、`--no-anim` 关掉循环动画、`--sessions 1` 作基线、`--chunk 20 --tick 100` 改成同样的字数但每秒 10 条（看「每条消息」那份固定开销有多大）、`--profile` 报一份采样热点；最后验一遍切过去补画有没有漏字：`node dev/multiSessionPerf.js --switch-every 2000` |
 | `ctxChip.js` | 量输入框顶边上那条（状态图 / 用量横杠 / 生成速度）与底行那颗模型名胶囊：摆假状态量各块的位置并放大截图，然后真跑一轮（假 pi），每 50 毫秒采一次横杠的两端 —— 这些位置是钉死的，跑起来、速度数出现 / 位数变化、停下都不该挪一个像素，两端出现第二种位置就报错：`FAKEPI_TICK_MS=100 npm run web:shot -- --fake-pi --script dev/ctxChip.js` |
+| `phaseMatrix.js` | 验「一个会话此刻处在哪个阶段」这一台机器（后端只算一处，界面五处只读）：先跑纯函数那张表（每档各一遍，含“不可能凑法”该向谁低头 —— loading 压过一切、压缩中 streaming 是 false 也算忙、想 / 工具压过写），再真跑一轮假 pi 看跑着是 streaming 且末尾写「卡住了」、跑完是 idle 且写「继续」，最后逐档投 `phaseChanged` 进去核五处是不是同一个答案（模型胶囊的 `data-st`、顶边那颗小图形、会话格那颗点蓝 / 黄 / 绿、末尾那颗胶囊），其中「压缩中」与「等你答（黄点 + 黄沙漏）」是新补的两档：`npm run web:shot -- --fake-pi --script dev/phaseMatrix.js` |
+| `runEnd.js` | 验「一轮怎么算结束」的两个异常缺口：跑到一半 pi 进程没了（假 pi 的「假装被杀」）也照样收一条 turnEnd（按出错算），界面跟着回到 idle、「继续」重新露面、那颗点不蓝；点过「卡住了」又自己发一句，那句“卡住了”作废、不再等停稳后补发（只数消息流里“卡住了”那几条）：`FAKEPI_THINK_MS=2500 npm run web:shot -- --fake-pi --script dev/runEnd.js` |
 | `iconAnim.js` | 量「输入框顶边上那颗状态图一直在转」到底吃多少 CPU（同一份页面里交替量转着 / 停着，不跨进程比）：412x915@3x、触屏、CPU 降 4 倍，报主线程忙、算样式次数、排版次数，以及页面上到底有哪些动画在跑；`--act thinking` 换一颗（沙漏 / 笔 / 灯泡 / 扳手）、`--seconds` `--rounds` 调每一轮多久与量几轮、`--profile 1` 顺便报一份采样热点：`node dev/iconAnim.js --seconds 15 --rounds 3` |
 | `sidebarPerf.js` | 量那颗 `<<<` 打开一次多少毫秒、滑入动画有没有被顶住（长任务 / 逐帧间隔）：`npm run web:shot -- --script dev/sidebarPerf.js` |
 | `swipePerf.js` | 量「手机上左右划切会话」卡不卡：两个会话各塞一屋子消息，按下 / 跟手 / 松手三段分开报（帧间隔中位与最长、最长那帧在挪动后多久、长任务、排版与算样式各花多少），还能设设备像素比、`--cold`（要进来的那个壳没预排版）、`--extra`（多开几个会话）、`--cpu N`（主线程拖慢几倍，近似手机）、`--profile`（剖整趟）、`--css`（临时塞一段样式试别的写法）：`node dev/swipePerf.js --pairs 800 --rounds 2 --cold --dsf 3 --cpu 4 --profile` |
@@ -487,6 +503,7 @@ SIDEBAR_BATCHES=40 SIDEBAR_ROUNDS=5 npm run web:shot -- --script dev/sidebarPerf
 | `olderHintFill.js` | 验顶上那条「往上还有 N 轮」的占位在“人划到跟前”时自己补出来（生成中也要补：以前生成中一律不补，往上翻就是一大片空白，一直空到这一轮跑完），补完占位要收掉：`FAKEPI_THINK_MS=8000 npm run web:shot -- --fake-pi --script dev/olderHintFill.js` |
 | `options.js` | 两条命令共用的命令行参数 |
 | `tabaTools.js` | 验子会话的「停掉」与「查看」两个工具（派活那条在 `tabaFlow.js`）：`FAKEPI_THINK_MS=4000 FAKEPI_TICK_MS=40 npm run web:shot -- --fake-pi --script dev/tabaTools.js` |
+| `newSessionChild.js` | 验派出去的子会话还在跑时点顶条那颗加号（新建会话）不关掉派活那个会话：顶条上从一格变成两格、旧那一格上还写着有几个子会话在跑，子会话跑完结果照旧交回没被关掉的那个会话：`FAKEPI_CHILD_SLOW_MS=8000 npm run web:shot -- --fake-pi --script dev/newSessionChild.js` |
 | `fakePi.js` | 假的 pi（`--fake-pi` 用）：协议跟真 pi 一样，模型换成按剧本演戏，界面调试秒回。说一句「问单选 / 问多选 / 问确认 / 问输入 / 问选项」就演一次问话；说一句「碰文件」就 read 几个铺好的文件（让后端那份「这个会话碰过的文件」清单里有东西）。**派子会话与问话那几个工具，它加载的是宿主写下的真扩展**（见 src/bridgeAssets.ts），所以那两段代码每跑一次 dev 脚本就真跑一遍。它还会照真 pi 的样子往会话目录里记一份 `fake-session-<进程号>.jsonl`（一行一条消息）——要读会话文件的那几条路（`#` 引用、派子会话带上父会话的路径）才验得到 |
 | `fake-pi.cmd` / `.sh` | 上面那个的包装：Windows 上 piPath 得是 .cmd 才能被 shell 起来 |
 | `makePng.js` | 生成示例图片（不依赖任何第三方库）：调试工作目录里那张 1600x400 的图就是它写的 |

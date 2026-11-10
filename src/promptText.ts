@@ -28,12 +28,17 @@ export type PromptKey =
     | "toolBash"
     | "toolBashTasks"
     | "toolAsk"
+    // ---- 拦下来的那两种（不跑这条命令，回一句话）----
+    | "guardWait"
+    | "guardDetach"
+    | "guardPoll"
     // ---- 派子会话 ----
     | "taskClosing"
     | "taskParentContext"
     | "taskDelivery"
     // ---- 其它来回话的正文 ----
     | "bashDelivery"
+    | "bashOutputDelivery"
     | "chatReference"
     | "title";
 
@@ -97,14 +102,16 @@ export const PROMPTS: Record<PromptKey, PromptSpec> = {
         vars: [],
         text:
             "也可以把命令放到后台跑（background: true）：工具立刻返回一个任务编号，"
-            + "命令在后台接着跑，跑完会自动把结果告诉你；中途要看输出用 bash_tasks <编号>。",
+            + "命令在后台接着跑，跑完会自动把结果告诉你；中途要看输出用 bash_tasks <编号>。"
+            + "需要自动收到新输出时加 notifyOutput: true：只在转到后台后通知，模型忙时合并，空闲时限频交回，不用反复查询。",
     },
     toolBashTasks: {
         label: "bash_tasks 工具的说明",
         vars: [],
         text:
             "管这个会话里放到后台跑的命令。不带编号：列出都有哪些、跑到哪一步了；"
-            + "带编号：看这条命令输出的最后一段；带编号再加 stop: true：把它和它派出来的进程一起停掉。",
+            + "带编号：看这条命令输出的最后一段；带编号再加 stop: true：把它和它派出来的进程一起停掉。"
+            + "刚看过一次、它又没出新东西的时候再查，会被挡回来（它跑完会自动交回来）。",
     },
     toolAsk: {
         label: "ask_choice（问用户选择题）工具的说明",
@@ -115,6 +122,39 @@ export const PROMPTS: Record<PromptKey, PromptSpec> = {
             + "问之前先把你自己的推荐和理由写在正文里（工具调用之前那段话）。"
             + "作答回来的可能是勾中的选项，也可能是用户自己写的一句话（那种按「用户自己的说法」理解）。"
             + "用户不答了、或者一直没答（等很久也没回应），就当作没作答：不要再重复问同一个问题，等用户开口。",
+    },
+    guardWait: {
+        label: "命令里干等被挡下来时回的那段",
+        vars: ["原因"],
+        text: [
+            "这条命令没跑：它在命令里等（{{原因}}）。",
+            "",
+            "在命令里等着的时候，这一轮就是死的：放到后台那条命令跑完的结果，只能等这一轮结束、下一次去问模型之前才交得进来 —— 你等多久就白等多久。",
+            "",
+            "要怎么办：",
+            "- 只是在等后台那条命令跑完：把这一截等待去掉，剩下的照原样重发一遍；要是这条命令的全部意义就是等，那这一轮直接说完结束就行 —— 它跑完会当成一条新消息交回来（开头是「后台命令 #编号 跑完了」）。",
+            "- 真必须歇一会儿（比如等一个服务起来）：不到十秒的可以过；更久就别在命令里等，先把它放到后台跑。",
+        ].join("\n"),
+    },
+    guardDetach: {
+        label: "把进程丢到背影里跑被挡下来时回的那段",
+        vars: ["原因"],
+        text: [
+            "这条命令没跑：它把活丢到背影里就完事了（{{原因}}），跑了什么、什么输出、退没退出，谁都拿不回来。",
+            "",
+            "要跑一条长的（服务、看日志、跑测试）：给 bash 加 background: true，让它整条放到后台 —— 它会出现后台任务里，输出写进日志，跑完自动把结果交回来，中途也能用 bash_tasks 看、用 bash_tasks stop 停。",
+            "只想让这半截立刻结束、接着做别的：拆成两条命令发。",
+        ].join("\n"),
+    },
+    guardPoll: {
+        label: "空查后台任务被挡下来时回的那段",
+        vars: ["编号"],
+        text: [
+            "没查：第 {{编号}} 条还在跑，而且从你上次看它到现在一个新字都没多。",
+            "",
+            "再查也还是这一份。它跑完会把最后那段输出当成一条新消息交回来（开头是「后台命令 #{{编号}} 跑完了」）。",
+            "这一轮还有别的活就接着干，没有就直接说完结束。",
+        ].join("\n"),
     },
     taskClosing: {
         label: "发给子会话的那段收尾要求（子会话靠它写最后的交代）",
@@ -160,6 +200,17 @@ export const PROMPTS: Record<PromptKey, PromptSpec> = {
             "（完整输出在 {{日志}}；要看别的片段用 bash_tasks {{编号}}。）",
         ].join("\n"),
     },
+    bashOutputDelivery: {
+        label: "后台命令自动交回新输出",
+        vars: ["输出"],
+        text: [
+            "【后台命令有新输出】",
+            "这是工具自动交回的输出，不是用户的新要求或确认。",
+            "输出来自下面写明的观察时间，可能已经过去一会儿，不代表命令现在的状态。",
+            "{{输出}}",
+            "根据输出处理需要做的事，其余工作可以继续；没有其他事情就结束这一轮，后续输出和完成结果会自动交回。不必干等或反复查进度。",
+        ].join("\n"),
+    },
     chatReference: {
         label: "# 引用另一个会话时发给模型的那段（只给记录文件路径）",
         vars: ["会话"],
@@ -197,11 +248,12 @@ export function isPromptKey(name: string): name is PromptKey {
 }
 
 /**
- * 以前有过、现在已经没有的项（`/goal` 那一套）。设置文件里还留着这些键是正常的：
+ * 以前有过、现在已经没有的项。设置文件里还留着这些键是正常的：
  * 不要把它当成"写错了名字"报出来，悄悄地不管它就行。
  */
 const RETIRED_PROMPT_KEYS = [
     "goalNegotiate", "goalStart", "goalResume", "goalJudge", "goalFeedback", "toolUpdateGoal",
+    "toolWatch", "watchDelivery",
 ];
 
 export function isRetiredPromptKey(name: string): boolean {

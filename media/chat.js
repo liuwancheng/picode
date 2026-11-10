@@ -73,6 +73,8 @@
   };
   /** 文件夹选择器里行首那颗图标：名字由宿主给（见 chatHost.ts 里 showFolderPicker 的 items）。 */
   const FOLDER_ROW_ICONS = { check: ICONS.check, up: ICONS["arrow-up"], folder: ICONS.folder };
+  /** 「新建文件夹」那个输入框最多收几个字（跟后端 dirBrowse.ts 那道上限同一个数）。 */
+  const NEW_FOLDER_MAX_CHARS = 100;
   /** 抽屉列表里“磁盘上存着的会话”那一段的标题：历史抽屉与「项目与会话」上半共用。 */
   const HISTORY_SECTION = "历史会话";
   const inputEl = document.getElementById("input");
@@ -962,7 +964,15 @@
       _historyBtn: null,
       _stage: null,
       _stageDropped: false,
+      _stageCursors: null,   // 往暂存区里画更早的历史时，暂存的“现在这一批”游标（见 STAGE_CURSORS）
       streaming: false,
+      // 这个会话此刻处在哪个阶段（见 src/sessionPhase.ts：后端算好推过来，界面只存、不自己拼）。
+      // 顶条那颗点、输入框那颗模型胶囊、顶边那颗小图形、末尾那颗胶囊、关会话要不要问第二遍，
+      // 全读这一个值 —— 以前这五处各挑几个字段自己算，于是同一时刻能得出不同答案。
+      phase: "loading",
+      busy: false,
+      // 要不要人管："" / "answer"（有题挂着等你答）/ "done"（跑完你还没看）。
+      attention: "",
       // 后台还有命令在跑（后端 sessionList 里那份）：这一轮答完了也算没干完，那颗点照旧绿点呼吸。
       bashRunning: false,
       // 这个会话放到后台、还在跑的命令（后端那份清单里 status 是 running 的，新的排前面）。
@@ -1397,7 +1407,11 @@
       const countEl = el.querySelector(".sn-count");
       if (countEl) { countEl.textContent = kids > 0 ? String(kids) : ""; }
       el.classList.toggle("current", !!item.current);
-      el.classList.toggle("streaming", !!(item.streaming || item.loading || item.bashRunning));
+      el.classList.toggle("streaming", !!(item.busy || item.bashRunning) && item.attention !== "answer");
+      // 有一道题在等你答：那颗点变黄、不呼吸 —— 一眼看得出是在等你，不是在跑。
+      // （以前这一档只有右下角那张提醒卡片看得见，顶条上它跟闲着一样。）
+      // 两档不同时亮：在等你的时候就不该再呼吸（蓝点骗人：它没在跑）。
+      el.classList.toggle("awaiting", item.attention === "answer");
       // 派出去的子会话还在跑：本会话自己闲着也把那颗点亮出来（一样呼吸），
       // 一眼看得出这一家子还在干活（等的是子会话，不是本会话在答）。
       el.classList.toggle("child-running", kids > 0);
@@ -1407,6 +1421,7 @@
         + (kids > 0 ? "，" + kids + " 个子会话在跑" : "")
         + (doneKids > 0 && kids === 0 ? "，" + doneKids + " 个子会话跑完了" : "")
         + (item.bashRunning ? "，后台还有命令在跑" : "")
+        + (item.attention === "answer" ? "，有一道题在等你答" : "")
         + (item.cwd ? "\n" + item.cwd : "")
         + "\n" + (item.current ? "当前会话" : "点这里切过去");
       // 当前这一格就叫 #sessionName（“当前会话叫什么”照旧拿这个名字找）
@@ -2113,7 +2128,7 @@
     st.suppressScroll = true;
     st.fromHistory = true;
     // 正插到一半的「加载更早」那批作废：它插进来的是旧节点，会跟这一遍对账打架
-    if (st._stage) { st._stage = null; st._stageDropped = true; }
+    if (st._stage) { st._stage = null; st._stageDropped = true; dropStageCursors(st); }
     st._historyBtn = null;
     // 这些东西重放里没有，是“现在这个状态”算出来的：先收掉，重放完按真实状态重算
     dropRunningLine(st);
@@ -2203,7 +2218,7 @@
 
   // ==================== 后台命令（消息流末尾那几条）====================
   // 放到后台跑的命令写在消息流最末尾（末尾那颗胶囊上面），一条一行、就长成「正在跑的那一条」那样：
-  // 一只走着的钟 + 编号 + 命令 + 一颗「停」+ 已经跑了多久（耗时靠右），一行放不下的字自己横向滚。
+  // 一只走着的钟 + 编号 + 命令 + 一颗「停」+ 已经跑了多久（耗时靠右），命令一步一行（有分隔符就换行，分隔符留在行尾），一步太长就在行尾省掉，整条点开看。
   // 钟跟齿轮是两回事：齿轮转（「正在跑的那一条」上那颗）是「模型这会儿正忙着」；
   // 钟的针在走是「这条命令在后台自己跑，不挡你说话，跑完它自己把结果交回这个会话」。
   // 跑完的不列：那条结果会当成一条新消息交回会话，去消息流里看。
@@ -2262,7 +2277,6 @@
     if (!tasks.length) {
       stopBashClock(st);
       if (st.bashBlock) {
-        for (const el of st.bashBlock.children) { dropRollKeyframes(el); }
         st.bashBlock.remove();
         st.bashBlock = null;
       }
@@ -2277,7 +2291,6 @@
     // 看着像又从头开始走了一遍。
     const key = tasks.map((it) => it.no).join(",");
     if (block.dataset.nos !== key) {
-      for (const el of block.children) { dropRollKeyframes(el); }
       block.dataset.nos = key;
       block.textContent = "";
       for (const task of tasks) { block.appendChild(bashRunRow(st, task)); }
@@ -2289,12 +2302,7 @@
       }
     }
     placeBashBlock(st);
-    // 量「放不放得下」得等它排到页面上（上面那一步才把它摆进去），所以摆好位置以后再量：
-    // 放不下的那条字自己横向滚（跟「正在跑的那一条」一模一样，见 rollRunningText）。
-    for (const el of block.children) {
-      const text = el.querySelector(".tr-text");
-      if (text) { rollRunningText(text, el); }
-    }
+    // 排到页面上以后才知道每条折了几行：裁到七行以内（多出来的算进「+N」）
     startBashClock(st);
   }
 
@@ -2312,7 +2320,7 @@
 
   /**
    * 一块里的那一行：钟 + 编号 + 命令 + 一颗「停」+ 已经跑了多久，就一行。
-   * 跟「正在跑的那一条」同一个样子（齿轮换成钟，前面多一个编号）：一行放不下的字自己横向滚，
+   * 跟「正在跑的那一条」同一个样子（齿轮换成钟，前面多一个编号）：命令一步一行（有分隔符就换行，分隔符留在行尾）、一步太长就在行尾省掉，
    * 耗时钉在右头不动（见 chat.css 里那几条 .tr-*）。
    */
   function bashRunRow(st, task) {
@@ -2325,25 +2333,21 @@
     no.className = "bash-run-no";
     no.textContent = "#" + task.no;
     row.appendChild(no);
-    // 命令原文也跟「正在跑的那一条」用同一套写法：一长串只写核心那一段（见 runningLineText），
-    // 后面灰一个「+N」，整条点开这一行看（见 attachTagTipHandlers）。
+    // 命令原文也跟「正在跑的那一条」用同一套写法：全摆出来、heredoc 正文写在下面（见 runningLineParts），
+    // 太长的算「+N」，整条点开这一行看（见 attachTagTipHandlers）。
     const cmd = task.cmd || "";
-    const shown = runningLineText({ name: "bash", argStr: JSON.stringify({ command: cmd }), text: "$ " + cmd });
-    const text = document.createElement("span");
-    text.className = "tr-text";
-    text.textContent = shown.main;
-    row.appendChild(text);
+    const shown = runningLineParts({ name: "bash", argStr: JSON.stringify({ command: cmd }), text: "$ " + cmd });
+    fillRunningText(row, shown);
     if (shown.more) {
       const more = document.createElement("span");
       more.className = "tr-more";
       more.textContent = shown.more;
       row.appendChild(more);
     }
-    if (shown.trimmed) {
-      row._tipCall = "$ " + cmd;
-      row._tipBody = "";
-      attachTagTipHandlers(row);
-    }
+    // 这一行点得开（跟「正在跑的那一条」一样）：行尾省掉的那截点开就能看整条。
+    row._tipCall = "$ " + cmd;
+    row._tipBody = "";
+    attachTagTipHandlers(row);
     // 「停」排在耗时左边（跟「正在跑的那一条」上那颗「放后台」一个位置）：字 | 停 | 耗时（靠右）
     const stop = document.createElement("button");
     stop.type = "button";
@@ -3030,11 +3034,11 @@
 
   // ==================== 正在跑的那一条 ====================
   // 工具标签只说得出工具名：命令行、读哪个文件、grep 找什么都在提示框里，不点开就看不见。
-  // 正在跑的那一条不一样：它在当前这批标签下面单占一行，把这一行的摘要直接写出来
-  // （bash 就是「$ 命令」）。一长串命令只写核心那一段、后面灰一个「+N」，整条点开那条才看得到
-  // （怎么挑核心见下面「一长串命令里的核心那一段」）。同时跑几条也只露一条 —— 只露最近开始的那条。
-  // 为什么不排成几行：几条一起跑时，先跑完的那条一收，这一块就矮一行，下面的东西跟着
-  // 上下跳一下（贴着底看的时候特别明显）。行数永远是 0 或 1，就没有这一下。
+  // 正在跑的那一条不一样：它在当前这批标签下面单占一块，把这一条命令直接摆出来
+  // （bash 就是「$ 命令」，切成几段摆成一条链、一步一行；见下面
+  // 「一长串命令怎么写」。同时跑几条也只露一条 —— 只露最近开始的那条。
+  // 这一块只装一条：几条一起跑时，先跑完的那条一收，这一块就矮一行，下面的东西跟着
+  // 上下跳一下（贴着底看的时候特别明显）。
   // 不出这行的两种：think（思考，内容在提示框里看）与 ask_choice（问话卡片本来就铺在消息流里，
   // 而且它要等人答完才算跑完，摆一行「正在跑」只会碍事）。
   //
@@ -3045,41 +3049,52 @@
   // 整条（字与位置）在这一批过去时一并收掉：下面出了正文 / 问话卡片，或者这一轮跑完
   // （见 endRunningLine）。
   //
-  // 一行写不完的（长命令行）：字自己慢慢横向滚，只往一个方向（从头滚到末尾，两端各停半秒再从开头来，
-  // 见 rollRunningText 与 chat.css 的 tr-roll），不然一颗「bash」加小半条命令就完了，看不出来在跑什么。
+  // 链是一步一行（有分隔符就换行，分隔符留在行尾，见 chat.css 的 .tr-step）；一步太长就在行尾省掉，不折行，
+  // 再多的就截断、末尾「…」，点开这一行看整条。heredoc 的正文自己折行，几行都摆在链下面。
   const RUNNING_LINE_SKIP = new Set([THINKING_NAME, "ask_choice"]);
-  const RUNNING_ROLL_MIN_PX = 4;    // 溢出这几个像素以内不算「放不下」（末尾省略号那点宽度，不值当滚）
-  const RUNNING_ROLL_SPEED = 30;    // 放不下的那行字自己滚动的快慢：每秒 30 像素（慢慢地滚）
-  // 两头各停多久（毫秒）：固定时间，不随命令长短变。以前是按「一趟的百分之几」算的，
-  // 一趟多长又按长度算（每秒 30 像素），于是命令越长开头死得越久：一千字的命令一趟三分钟，
-  // 前六秒多一个像素都不走（真机上就是这个「一动不动」）。量法与数据见 dev/runningLine.js。
-  const RUNNING_ROLL_HOLD_MS = 500;
   const RUNNING_CLOCK_MS = 200;     // 后面那个耗时的刷新快慢（一秒里刷五回就够看着在走）
 
-  // ==================== 一长串命令里的核心那一段 ====================
-  // 模型爱写一长串：cd 到某个目录 && 跑个脚本 | sed 看头几行。整条摆在「正在跑」那一行上，
-  // 一眼看不出在干什么（一行放不下还得横着滚半天）。这里只按字面把命令切成几段，把「正经干活」的那段挑出来：
-  //   · 挪位置的（cd / pushd / popd）、打杂的（echo / export / sleep / true …）不算事；
-  //   · 挂在管道后面、只修输出的（sed / head / tail / cut / sort / wc …）不算事；
-  //   · 剩下的头一段就是核心（grep / jq / awk / xargs 不当作修输出的：它们常常就是查的东西本身）。
-  // 分不出核心（只有一段、或者全被打杂的占满）就照原样整条写出来。
-  // 命令只是一行字，这么切只是猜：整条一直留着，点开那一行就能看（见 syncRunningLine）。
+  // ==================== 一长串命令怎么写 ====================
+  // 模型爱写一长串：cd 到某个目录 && 跑个脚本 | sed 看头几行，还有 heredoc 那种把一整段脚本塞进来的。
+  // 这里按字面把命令切成几段，一段都不藏：段间的 && | ; 照原样写在链上（灰一点），
+  // 换行只发生在分隔符上（heredoc 的正文也拼回那一行里，太长就在行尾省掉）。整条点开那一行也能看（见 syncRunningLine）。
+  // 以前是从里头挑「正经干活」的那一段写出来，挑错了不少（`git log; rm -rf dist; npm run build`
+  // 摆出来的是 `git log`，删目录和真编译两段全藏了），所以不挑了：藏东西比挑错更害人。
+  // 只把「只看一眼、不改东西」的那几段字调淡：会改东西的那几段（rm / chmod / 写文件 / 跑构建 / 跑脚本）
+  // 保持正常深浅 —— 它们才是该被看见的。认不准一律当「会改」：淡了容易看漏，所以只有认得准的才淡。
   const SEG_PROG_SKIP = new Set(["sudo", "time", "env", "nohup", "command", "exec", "builtin", "nice", "!", "{", "do", "then", "else", "elif", "if", "while", "until"]);
-  const SEG_NOISE = new Set(["cd", "pushd", "popd", "echo", "printf", "export", "unset", "set", "true", "false", ":", "sleep", "wait", "clear", "sync",
-    "continue", "break", "exit", "return", "shift", "local", "declare", "readonly", "umask", "dirs"]);
-  const SEG_PIPE_TAIL = new Set(["sed", "head", "tail", "cut", "sort", "uniq", "wc", "tr", "tee", "column", "less", "more", "nl", "fmt", "tac", "rev", "fold", "paste"]);
-  // 只翻看一眼的（ls / cat / wc / head …）：有正经干活的段时它们不抢核心，
-  // 一条正经活都没有（就 dd 看一眼、数数行）才轮得到它们（见 pickCoreSegment）
-  const SEG_GLANCE = new Set(["ls", "cat", "wc", "head", "tail", "file", "stat", "du", "tree", "pwd", "which", "where", "type", "readlink"]);
-  // 框架词：单独占一段时它就是 for / if 那套的骨头，不是一件活（`done`、`fi` 曾被当成核心写出来过）
+  // 只读的：看一眼、不改文件、不动系统（ls / cat / grep / sed / jq …），以及挪位置、调环境、
+  // 流程控制这些（cd / export / sleep / exit …）。要往里加新词先问一句：它会不会写文件 / 起服务 / 连网？
+  const SEG_READONLY = new Set([
+    // 看一眼
+    "ls", "cat", "head", "tail", "nl", "tac", "rev", "fold", "column", "less", "more", "file", "stat", "du", "df", "tree",
+    "wc", "pwd", "which", "where", "type", "readlink", "realpath", "basename", "dirname", "date", "whoami", "id", "uname", "ps",
+    "grep", "rg", "find", "fd", "cut", "sort", "uniq", "tr", "jq", "awk", "diff", "comm", "cmp", "sed", "echo", "printf", "true", "false", ":", "test", "[", "[[",
+    // 挪位置 / 调环境 / 流程（都不碰文件）
+    "cd", "pushd", "popd", "dirs", "export", "unset", "set", "local", "declare", "readonly", "umask", "sleep", "wait", "clear", "sync",
+    "continue", "break", "exit", "return", "shift",
+  ]);
+  // 这几个平时只读，带了某个开关就会就地改东西：带上了就当它会改（sed -i 写回文件、find -delete 删）。
+  // 测试的是「程序名后面那一段」：匹配写宽一点无所谓，认错的方向要是「显眼」。
+  const SEG_MUTATING_FLAGS = {
+    sed: /(^|\s)-i/,
+    find: /(^|\s)-(delete|exec|execdir|ok|okdir|fprint|fprintf)\b/,
+    sort: /(^|\s)(-o\b|--output)/,
+    awk: /(^|\s)-iinplace/,
+  };
+  // 分两级看的：子命令是只读的才当只读（`git log` 淡、`git commit` 不淡）。
+  // 只收认得准的：`git branch` / `git tag` / `git remote` / `git config` 都会改东西，不收。
+  const SEG_READONLY_SUB = {
+    git: new Set(["log", "status", "diff", "show", "blame", "rev-parse", "rev-list", "ls-files", "shortlog", "describe", "cat-file", "grep", "show-ref", "reflog"]),
+    npm: new Set(["ls", "list", "view", "info", "outdated", "why", "root", "prefix", "bin"]),
+  };
+  // 框架词：单独占一段时它就是 for / if 那套的骨头，不是一件东西（`done`、`fi` 会被当活写出来过）
   const SEG_FRAME = new Set(["do", "then", "else", "elif", "fi", "done", "esac", "in", "{", "}", "(", ")"]);
-  // 条件判断本身（`[ -f "$f" ]` / `test …`）：算「只翻一眼」那档 —— 循环体里它后面往往才是真干活
-  const SEG_CHECK = new Set(["[", "[[", "test"]);
-  // 段首是这些词的（for / if / while 那一套的开头）本身不是一件事
+  // 段首是这些词的（for / if / while 那一套的开头）本身不是一件东西
   const SEG_LOOP_HEAD = new Set(["for", "while", "until", "select"]);
-  const SEG_COND_HEAD = new Set(["if", "case"]);
-  // 显示时从段首剥掉的：框架词（「do python x.py」写成「python x.py」、「if grep …」写成「grep …」）
-  const SEG_DISPLAY_STRIP = new Set(["do", "then", "else", "elif", "!", "{", "if", "while", "until", "for", "case", "select"]);
+  // 显示时从段首剥掉的：纯连接词（「do python x.py」写成「python x.py」、「then echo ok」写成「echo ok」）。
+  // for / if / while / case 这些不剥：它们一句就说明白了这一行在干什么（剥完只剩「f in *.ts」反而看不懂）。
+  const SEG_DISPLAY_STRIP = new Set(["do", "then", "else", "elif", "!", "{"]);
 
   /** 这一行的收尾标记（heredoc 的 `<<EOF`）：`<<` 后面那个词，引号去掉、`<<-` 的前导 tab 也认。
    *  不是 heredoc（`<<<` 是 herestring、或者后面没东西）就返回空。 */
@@ -3114,8 +3129,8 @@
     const out = [];
     const s = String(cmd || "");
     let cur = "", pendingSep = "", quote = "", depth = 0;
-    // 这一行上挂着的 heredoc 收尾标记（`cat <<A <<B` 会有两个，按顺序吃）：
-    // 有它就不能拿换行当分隔符 —— 下面是那段正文，一直到单独一行就是它为止
+    // 这一行上挂着的 heredoc：收尾标记 + 它是哪一段的（那一段在 out 里的下标；
+    // 还没落进 out 就是 out.length —— 那就是手上正在接的这一段）
     const heredocs = [];
     const flush = () => {
       const text = cur.trim();
@@ -3138,21 +3153,30 @@
       if (ch === "(") { depth++; cur += ch; continue; }
       if (ch === ")") { if (depth > 0) { depth--; } cur += ch; continue; }
       if (depth > 0) { cur += ch; continue; }
-      if (ch === "<") {
+      if (ch === "<" && prev !== "<") {
+        // 只在头一个 `<` 上看（`<<EOF` 的第二个也是 `<`，再看一遍就会把这个收尾标记又记一遍，
+        // 于是后一半命令会被当成第二段正文吃掉）
         const delim = heredocDelim(s, i);
-        if (delim) { heredocs.push(delim); }
+        if (delim) { heredocs.push({ delim, owner: out.length }); }
       }
       if (ch === "\n" && heredocs.length) {
-        // 接下来这几块是正文：原样吃进来，一个字都不切
+        // 接下来这几块是正文：原样吃进来，一个字都不切。正文归开它的那一段，
+        // 不是归行尾那一段：`cat <<EOF | grep foo` 的正文是给 cat 的，不是给 grep 的。
         let at = i + 1;
         while (heredocs.length) {
-          const got = takeHeredocBody(s, at, heredocs.shift());
-          cur += (cur.endsWith("\n") ? "" : "\n") + got.text;
+          const h = heredocs.shift();
+          const got = takeHeredocBody(s, at, h.delim);
+          const owner = out[h.owner];
+          if (owner) { owner.text += "\n" + got.text; }
+          else { cur += (cur.endsWith("\n") ? "" : "\n") + got.text; }
           at = got.next;
           if (at >= s.length) { break; }
           at += 1;   // 跳过收尾行的换行，接着吃下一个 heredoc 的正文
         }
-        cut(";");
+        // 正文吃完了：这一行就到这儿为止（后面那些字是另一行 / 另一条命令了）。
+        // 手上这一段该落的落下去（它前面那个分隔符 flush 会自己认）；下一段的开头是换行。
+        flush();
+        pendingSep = ";";
         i = at - 1;
         continue;
       }
@@ -3175,19 +3199,21 @@
     return out;
   }
 
-  /** 这一段跑的是哪个程序：跳过前面的环境变量赋值（FOO=1）与 sudo / time 这类前缀，
-   *  取第一个词，带路径的只留文件名。 */
-  function segmentProgram(text) {
-    for (const raw of String(text || "").trim().split(/\s+/)) {
-      const w = raw.replace(/^["']+|["']+$/g, "");
+  /** 这一段跑的是哪个程序、子命令是哪个：跳过前面的环境变量赋值（FOO=1）与 sudo / time 这类前缀，
+   *  取第一个词（带路径的只留文件名），再给它后面那个词。
+   *  返回 { prog, sub, rest }（rest 是程序名后面那一整段，查开关用）。 */
+  function segmentProg(text) {
+    const words = String(text || "").trim().split(/\s+/);
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i].replace(/^["']+|["']+$/g, "");
       if (!w) { continue; }
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) { continue; }
       if (SEG_PROG_SKIP.has(w)) { continue; }
       const base = w.replace(/^.*[\\/]/, "");
       if (SEG_PROG_SKIP.has(base)) { continue; }
-      return base;
+      return { prog: base, sub: words[i + 1] || "", rest: words.slice(i).join(" ") };
     }
-    return "";
+    return { prog: "", sub: "", rest: "" };
   }
 
   /** 这一段开头的那个词（认 do / then / done / fi / if / [ 这些框架用；前面挂的（ { ! 先剥掉）。 */
@@ -3196,50 +3222,56 @@
     return m ? m[1].replace(/[)};]+$/, "") : "";
   }
 
-  /** 这一段值多少（挑核心时用）：2 = 正经干活；1 = 只翻看一眼（ls / cat / wc / [ 这类）；
-   *  0 = 不算事（挪位置的、打杂的、管道后面修输出的、for / if 那套的骨头）。
-   *  判之前先把段首的框架词剥掉：`do if grep …` 里真正干活的是 grep，不是 do。 */
-  function segmentRank(seg, i) {
+  /** 这一段里有没有往文件里写的重定向（`> x` / `>> x`）。`2>&1`、`>&2` 这种把输出换个地方的不算；
+   *  引号里的一律不算（`echo "a > b"`）。带上 heredoc 的 `cat > x <<EOF` 算写文件（它就是在写）。 */
+  function segmentWritesFile(text) {
+    const s = String(text || "").replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+    return />>?/.test(s.replace(/\d*>&\d+/g, ""));
+  }
+
+  /** 这一段是不是「只看一眼、不改东西」（只用来把字调淡，不藏东西）。
+   *  认不准一律返回 false（当它会改）：淡了容易看漏，宁可多显眼一点。
+   *  不算数的两种也算进来：for / if 那套的骨头、以及带 heredoc 正文的「cat <<EOF」（它就是看一眼）。 */
+  function isReadOnlySegment(seg) {
     const rawHead = segmentHeadWord(seg.text);
-    // for / while / case 的循环头本身不是一件活（剥掉 for 只剩个变量名）
-    if (SEG_LOOP_HEAD.has(rawHead) || rawHead === "case" || rawHead === "function") { return 0; }
-    const body = segmentDisplay(seg.text);
-    const head = segmentHeadWord(body);
-    if (!body || SEG_FRAME.has(head)) { return 0; }
-    const prog = segmentProgram(body);
-    if (!prog || SEG_NOISE.has(prog)) { return 0; }
-    if (i > 0 && seg.sepBefore === "|" && SEG_PIPE_TAIL.has(prog)) { return 0; }
-    if (SEG_CHECK.has(head) || SEG_GLANCE.has(prog)) { return 1; }
-    return 2;
+    if (SEG_LOOP_HEAD.has(rawHead) || rawHead === "case" || rawHead === "function") { return true; }
+    const text = segmentDisplay(seg.text);
+    const head = segmentHeadWord(text);
+    if (!text || SEG_FRAME.has(head)) { return true; }
+    const { prog, sub, rest } = segmentProg(text);
+    if (!prog) { return false; }
+    if (segmentWritesFile(text)) { return false; }   // `cat > x` / `>> log` 都是在写文件
+    const flag = SEG_MUTATING_FLAGS[prog];
+    if (flag && flag.test(rest)) { return false; }   // sed -i / find -delete / sort -o
+    const subs = SEG_READONLY_SUB[prog];
+    if (subs) { return subs.has(sub); }              // git log 淡、git commit 不淡
+    return SEG_READONLY.has(prog);
   }
 
-  /** 挑核心段：先找正经干活的那段（2 分）；一条都没有，才退到「只翻看一眼」的那段（1 分）。
-   *  同样值的取头一个 —— 所以「ls 一眼、再 grep 真查」挑出来的是 grep，
-   *  「ls 一眼、再 wc -l 数行数」两条都只值一分，还是挑头一个。 */
-  function pickCoreSegment(segs) {
-    let best = -1, bestRank = 0;
-    for (let i = 0; i < segs.length; i++) {
-      const rank = segmentRank(segs[i], i);
-      if (rank > bestRank) {
-        bestRank = rank;
-        best = i;
-        if (rank === 2) { break; }   // 2 分到顶了：头一个正经干活的就够了
-      }
-    }
-    return best < 0 ? null : segs[best];
-  }
-
-  /** 这一段写在那一行上长什么样：剥掉段首那几个连接词（do / then / ! …）；
-   *  带 heredoc 正文的那种只写头一行（下面那一整块是脚本 / 数据，不是命令，整条在提示里看）。 */
+  /** 这一段写在链上长什么样：剥掉段首那几个连接词（do / then / ! …）；
+   *  带 heredoc 正文的那种只写头一行（正文由调用方跟在下面写，见 runningLineParts）。 */
   function segmentDisplay(text) {
     let out = String(text || "").trim();
+    const nl = out.indexOf("\n");
+    if (nl >= 0) { out = out.slice(0, nl).trim(); }
     for (;;) {
       const m = /^(\S+)\s+([\s\S]*)$/.exec(out);
       if (!m || !SEG_DISPLAY_STRIP.has(m[1])) { break; }
       out = m[2].trim();
     }
-    const nl = out.indexOf("\n");
-    return nl < 0 ? out : out.slice(0, nl).trim();
+    return out;
+  }
+
+  /** 段与段之间那个分隔符写在链上长什么样（照原样写，灰一点）：管道就是一根竖线，
+   *  换行在 splitter 里已经归成 `;` 了。 */
+  function segmentSep(sep) {
+    switch (sep) {
+      case "|": return "|";
+      case "||": return "||";
+      case "&&": return "&&";
+      case "&": return "&";
+      default: return ";";
+    }
   }
 
   /** bash 调用里那条命令原文（参数是 JSON 字符串）。 */
@@ -3249,31 +3281,122 @@
       return a && typeof a.command === "string" ? a.command : "";
     } catch (e) { return ""; }
   }
-  /** 「正在跑」那一行写什么：一长串 bash 命令只写核心那一段（后面灰一个「+N」），
-   *  整条留在点开这一行的提示框里（trimmed=true 说明有字没写出来，得给个提示）。分不出来就照原样写。 */
-  function runningLineText(call) {
+
+  // ==================== 这条命令怎么摆 ====================
+  // 一个字的命令都不藏：切成几段摆成一条链（段间的 && | ; 照写），一步一行，一步太长就在行尾省掉。
+  // 换行只发生在分隔符上（不按宽度折行、也不给 heredoc 另起一块正文）：一行一步，简单好认。
+  const RUNNING_CHAIN_MAX = 5;
+  // 一整块参数（`node -e '…'`、`git commit -m "…"`、`curl -d '{…}'`）超过这么多字，
+  // 就把中间省掉、两头各留一截：折行也改不了那一块字就是一个个转义符的事实，
+  // 与其摆三四行转义，不如一句话说清「这里有一大块没摆」。两头留的是「用什么跑」与「往哪写」。
+  const RUNNING_BLOB_MAX = 120;
+  const RUNNING_BLOB_KEEP = 48;   // 两头各留多少字
+
+  /** 把一段文字里太长的那几块（引号里的一整段，或不带空白的长词）从中间折起来。
+   *  返回 { text, folded }：folded 说明有东西没写出来（得挂提示框）。最多折两块，再多的扫不到就是脏。 */
+  function foldLongBlobs(text) {
+    let folded = 0;
+    const out = String(text || "").replace(/'[^']*'|"[^"]*"|`[^`]*`|[^\s'"`]+/g, (whole) => {
+      if (folded >= 2) { return whole; }
+      const quote = /^['"`]/.test(whole) ? whole[0] : "";
+      const body = quote ? whole.slice(1, -1) : whole;
+      if (body.length <= RUNNING_BLOB_MAX) { return whole; }
+      folded += 1;
+      const keep = Math.min(RUNNING_BLOB_KEEP, Math.max(8, Math.floor(body.length / 4)));
+      const cut = body.length - keep * 2;
+      return quote + body.slice(0, keep) + " …（省 " + cut + " 字）… " + body.slice(-keep) + quote;
+    });
+    return { text: out, folded: folded > 0 };
+  }
+
+  /** 「正在跑」那一行写什么（消息流末尾的后台命令那几行也用这一套）：
+   *  chain —— 链上那几段，每段 { text, sep, dim, prompt }（sep 是它前面那个分隔符，头一段没有；
+   *  prompt 是要不要在前面写个 `$ `；dim 是只看一眼、不改东西的那几段（字淡））；
+
+   *  more —— 没摆出来的段数（写出来是「+N」，空=全摆上了）；
+   *  trimmed —— 有字没写出来（段太多 / 正文太长 / 多行），点开这一行看整条。
+   *  不是 bash 的（read / edit / grep …）就一行字，照原样写。 */
+  function runningLineParts(call) {
     const whole = call.text || call.name || "";
-    const oneLine = (text) => {
+    const firstLine = (text) => {
       const nl = text.indexOf("\n");
       return nl < 0 ? text : text.slice(0, nl).trim();
     };
-    const asIs = () => {
-      const main = oneLine(whole);   // 多行的那种（heredoc 脚本）只写头一行，其余在提示里
-      return { main, more: "", trimmed: main !== whole };
-    };
+    const asIs = () => ({
+      chain: [{ text: firstLine(whole), sep: "", dim: false, prompt: false }],
+      body: [], more: "", trimmed: firstLine(whole) !== whole,
+    });
     if (call.name !== "bash") { return asIs(); }
     const cmd = bashCommandOf(call.argStr);
     const segs = splitCommandSegments(cmd);
     if (!segs.length) { return asIs(); }
-    // 只有一段就用那一段（哪怕它是 cd / echo）；好几段才挑「正经干活」的那段
-    const core = segs.length > 1 ? pickCoreSegment(segs) : segs[0];
-    if (!core) { return asIs(); }
+    const chain = [];
+    let hidden = 0, blobCut = false;
+    for (let i = 0; i < segs.length; i++) {
+      const seg = segs[i];
+      const lines = seg.text.split("\n");
+      if (chain.length >= RUNNING_CHAIN_MAX) { hidden += 1; continue; }
+      // 多行的（heredoc 正文、`&& \` 续行）也拼回一行：换行只发生在分隔符上，别处一律不折。
+      const text = lines.join(" ");
+      // 续行的那个反斜杠连它后面的空白一起去掉；再一大块参数（一段内联脚本那种）折起来
+      const folded = foldLongBlobs(segmentDisplay(text.replace(/\\\s+/g, " ")));
+      if (folded.folded) { blobCut = true; }
+      chain.push({
+        text: folded.text,
+        sep: i === 0 ? "" : segmentSep(seg.sepBefore), dim: isReadOnlySegment(seg), prompt: i === 0,
+      });
+    }
     // 整条摘要里 "$ " + 命令 后面那点尾巴（timeout 这类）照旧跟着写
     const head = "$ " + cmd;
     const tail = whole.startsWith(head) ? whole.slice(head.length).trim() : "";
-    const main = "$ " + segmentDisplay(core.text) + (tail ? " " + tail : "");
-    const more = segs.length > 1 ? "+" + (segs.length - 1) : "";
-    return { main, more, trimmed: !!more || main !== whole };
+    if (tail && chain.length) { chain[chain.length - 1].text += " " + tail; }
+    return {
+      chain, hidden, more: hidden ? "+" + hidden : "",
+      trimmed: !!hidden || blobCut || firstLine(whole) !== whole,
+    };
+  }
+
+  /** 把 runningLineParts 那份东西画进 host 里（先清空）：一步一行，一步太长就在行尾省掉
+   *  （看 chat.css 的 .tr-step）。 */
+  function fillRunningText(host, parts) {
+    // 只换掉上一次画的那一块（齿轮 / 钟 / 编号都还挂在 host 上，不能一起清掉）
+    const old = host.querySelector(":scope > .tr-content");
+    if (old) { old.remove(); }
+    const oldPrompt = host.querySelector(":scope > .tr-prompt");
+    if (oldPrompt) { oldPrompt.remove(); }
+    const content = document.createElement("div");
+    content.className = "tr-content";
+    const line = document.createElement("div");
+    line.className = "tr-text";
+    // 一步一个 .tr-step：那一段命令 + 它后面那个分隔符（分隔符跟在行尾，跟人写多行命令一个样子：
+    // `cd x &&` 换行 `npm test`）。折行时整步一起挪到下一行，不会把一段命令拆成两半。
+    for (let i = 0; i < parts.chain.length; i++) {
+      const seg = parts.chain[i];
+      const step = document.createElement("span");
+      step.className = "tr-step";
+      const t = document.createElement("span");
+      t.className = seg.dim ? "tr-seg-dim" : "tr-seg";
+      t.textContent = seg.text;
+      step.appendChild(t);
+      // 分隔符属于它前面那一段（下一段开头那个 && / | / ;），所以跟在队尾
+      const next = parts.chain[i + 1];
+      if (next && next.sep) {
+        const s = document.createElement("span");
+        s.className = "tr-sep";
+        s.textContent = " " + next.sep + " ";
+        step.appendChild(s);
+      }
+      line.appendChild(step);
+    }
+    content.appendChild(line);
+    host.appendChild(content);
+    // `$ ` 摆在链外面（链的左边）：折行后第二行起自然就跟第一行「$ 」后面那个字对齐（见 chat.css）。
+    if (parts.chain[0] && parts.chain[0].prompt) {
+      const p = document.createElement("span");
+      p.className = "tr-prompt";
+      p.textContent = "$ ";
+      host.insertBefore(p, content);
+    }
   }
 
   /** 现在还有哪些调用在跑、各自那一行摘要与开始时刻（一条一行，按页面上标签的顺序）。
@@ -3327,7 +3450,7 @@
     const call = shownRunningCall(calls);
     const line = st.runningLine;
     // 露的还是同一条（同行里别的跑完了、或者又起了一条都不管）：一个字都不动。
-    // 重画一遍会把字横向滚的动画从头开始，这一块的高度也会抖一下 —— 正是要躲的。
+    // 重画一遍这一块的高度会抖一下 —— 正是要躲的。
     const key = (call.startedAt || 0) + "\u0000" + call.text;
     const shownItem = line ? line.firstElementChild : null;
     if (shownItem && st.runningKey === key && !shownItem.classList.contains("done")) {
@@ -3345,20 +3468,18 @@
     const item = document.createElement("div");
     item.className = "tool-running-item";
     item.insertAdjacentHTML("afterbegin", GEAR_SVG);
-    const t = document.createElement("span");
-    t.className = "tr-text";
-    const shown = runningLineText(call);
-    t.textContent = shown.main;
-    item.appendChild(t);
-    // 只写了核心那一段：后面灰一个「+N」（这一句不跟着滚，一直看得见）
+    const shown = runningLineParts(call);
+    fillRunningText(item, shown);
+    // 超过 RUNNING_CHAIN_MAX 步的就是「+N」（完整命令点开这一行看）
     if (shown.more) {
       const more = document.createElement("span");
       more.className = "tr-more";
       more.textContent = shown.more;
       item.appendChild(more);
     }
-    if (shown.trimmed) {
-      // 有字没写出来（只写了核心那一段 / 脚本只写了头一行）：点开这条看整条语句
+    if (shown.trimmed || call.name === "bash") {
+      // 这一行点得开：行尾省掉的那截、收进「+N」的那几步，点开一下就能看全。
+      // 没省掉的也挂上：命令行一长，点一下就整条到手。
       item._tipCall = call.text;
       item._tipBody = "";
       attachTagTipHandlers(item);
@@ -3379,7 +3500,7 @@
       });
       item.appendChild(detach);
     }
-    // 这条跑了多久：钉在这一条末尾（字自己滚的时候它不动，见 chat.css 的 tr-time）。
+    // 这条跑了多久：钉在这一条末尾（字折行的时候它不动，见 chat.css 的 tr-time）。
     // 重放出来的老调用没有开始时刻：干脆不添那个位置（see runningCalls）
     if (call.startedAt) {
       const time = document.createElement("span");
@@ -3391,13 +3512,10 @@
     el.appendChild(item);
     placeRunningLine(st, el);
     startRunClock(st);
-    // 量「这一行放不放得下」得等它排到页面上（新起一条时上面那一步才把它插进去），
-    // 所以挪完位置再看一眼：放不下的改成自己滚（见 rollRunningText）。
-    rollRunningText(t, el);
   }
 
   /** 那条「正在跑」上后面那个耗时：每 RUNNING_CLOCK_MS 重写一次（只动那几个数字，不动字、
-   *  不重排这一条），所以字自己横向滚的时候耗时不动。 */
+   *  不重排这一条），所以字折行的时候耗时不动。 */
   function startRunClock(st) {
     if (st.runClock) { return; }
     st.runClock = setInterval(() => {
@@ -3426,58 +3544,8 @@
     return Math.floor(min / 60) + "时" + (min % 60 < 10 ? "0" : "") + (min % 60) + "分";
   }
 
-  /** 这一条的字一行放得下就不动（末尾不够就省略号）；放不下就让它自己慢慢横向滚：
-   *  滚的距离就是溢出的那些像素（--tr-shift），一趟多长由「走的那段每秒 30 像素 + 两头各停
-   *  RUNNING_ROLL_HOLD_MS」算出来（--tr-dur），停顿的写法见下一条。
-   *  进来时 .tr-text 里已经写好了（可能还带一个灰色小尾巴以外的东西，见 syncRunningLine）：
-   *  这里只把它那几块整体挪进滚动那一层，一个字的样式都不变。 */
-  function rollRunningText(t, line) {
-    t.classList.remove("roll");
-    t.style.removeProperty("--tr-shift");
-    t.style.removeProperty("--tr-dur");
-    dropRollKeyframes(line);   // 上一条命令那份 keyframes（换一条就不用了）
-    const over = t.scrollWidth - t.clientWidth;
-    if (over < RUNNING_ROLL_MIN_PX) { return; }
-    const run = document.createElement("span");
-    run.className = "tr-run";
-    while (t.firstChild) { run.appendChild(t.firstChild); }
-    t.appendChild(run);
-    t.classList.add("roll");
-    const dur = over / RUNNING_ROLL_SPEED * 1000 + RUNNING_ROLL_HOLD_MS * 2;
-    t.style.setProperty("--tr-shift", -over + "px");
-    t.style.setProperty("--tr-dur", dur / 1000 + "s");
-    run.style.animationName = writeRollKeyframes(line, RUNNING_ROLL_HOLD_MS, dur);
-  }
-
-  // 页面上一时只露着一条「正在跑」（每会话一条），但几个会话各自都可能有：所以 keyframes
-  // 一条一份、名字带编号，换命令 / 收掉这条时把自己那份删了，页面上不会攒一堆。
-  let runningRollKeySeq = 0;
-
-  /** 给这一条写一份 keyframes：两头的停顿在 keyframes 里只能写成「一趟的百分之几」，
-   *  要停固定的毫秒数就得按这一条的一趟时长换算（所以要一条一份）。
-   *  三格：0% 与 X% 都停在开头（= 停顿），到 (100-X)% 走到末尾，之后一直停在那里直到 100%。
-   *  返回这份 keyframes 的名字（调用方把它挂到滚字的那层上）。 */
-  function writeRollKeyframes(line, holdMs, durMs) {
-    const pct = Math.min(45, Math.max(0.001, holdMs / durMs * 100));
-    const name = "tr-roll-" + (++runningRollKeySeq);
-    const style = document.createElement("style");
-    style.textContent = "@keyframes " + name + "{0%{transform:translateX(0)}"
-        + pct.toFixed(3) + "%{transform:translateX(0)}"
-        + (100 - pct).toFixed(3) + "%{transform:translateX(var(--tr-shift,0px))}}";
-    document.head.appendChild(style);
-    if (line) { line._rollKeys = style; }
-    return name;
-  }
-
-  /** 把这一条那份 keyframes 收掉（这条不再需要滚了 / 换了一条命令 / 整条收掉了）。 */
-  function dropRollKeyframes(line) {
-    if (!line || !line._rollKeys) { return; }
-    line._rollKeys.remove();
-    line._rollKeys = null;
-  }
-
   /** 一条都不在跑了：把留在页面上的这条冻住 —— 齿轮停转、耗时定在跑完那一刻，字留着
-   *  （长命令照旧自己滚：滚是为了看全命令，跟还在不在跑是两回事）。
+   *  （长命令写不完照样把折的那几行留着）。
    *  这一行只有一条，不用挑：几条几乎同时跑完时，页面上的就是最后露着的那条。
    *  已经冻住的再来一遍什么都不动：耗时记的是这条跑了多久，不能跟着后面发生的事继续往上涨。 */
   function freezeRunningLine(st) {
@@ -3499,7 +3567,6 @@
     stopRunClock(st);
     st.runningKey = "";
     if (st.runningLine) {
-      dropRollKeyframes(st.runningLine);
       st.runningLine.remove();
       st.runningLine = null;
     }
@@ -3586,16 +3653,17 @@
   }
 
   /** 想完一段：整段文本补上、标签停住。历史重放只来一条全文（没有开始事件），这里现开一个再收尾。
-   *  forceNew：往暂存区补更早的历史时用（正在想的那一条在真的窗格里，别动它）。 */
-  function endThinking(st, text, forceNew, msg) {
+   *  往暂存区补更早的历史时不再需要“强制新开”：那会儿“正在想的那一条”已经整组存起来了
+   *  （见 STAGE_CURSORS），暂存区里的 `st.thinkingEntry` 本来就只指它自己的。 */
+  function endThinking(st, text, msg) {
     // 后端现在一字不传（正文只在点开提示框时取），所以“没有文本”不等于“没有这一段”：
     // 只要消息里带着“还有多少字没带过来”，这一段照样要出一颗标签（重放历史全靠这一条）。
     const clip = msg ? clipOf(msg) : null;
-    let entry = forceNew ? null : st.thinkingEntry;
+    let entry = st.thinkingEntry;
     // 收尾（thinking_end）比正文晚到的 provider（openai-completions 那一路：正文边流边给，
     // 收尾整条流跑完才发）会先被“正文开始了”那颗兜底收掉，全文这时才到：补进那一条，
     // 别再新开一颗 —— 不然同一段思考在界面上成了两颗，前一颗还写着空的。
-    if (!entry && clip && !forceNew) { entry = pendingThinkOf(st, clip.key); }
+    if (!entry && clip) { entry = pendingThinkOf(st, clip.key); }
     if (!entry) {
       if (!text && !clip) { return; }   // 没在想的、又没有文本（重复收尾）：不用管
       entry = addToolToGroup(st, THINKING_NAME, "", "");
@@ -3674,7 +3742,6 @@
   // ==================== 完整模式：TUI 风格工具卡片 ====================
   // 有定制调用行摘要的工具（与 pi TUI 一致），其余工具回退为加粗工具名 + pretty JSON 参数。
   const CUSTOM_CALL_TOOLS = new Set(["bash", "grep", "find", "ls", "read"]);
-  const TOOL_PREVIEW_LINES = 6; // 结果预览行数（同 TUI BASH_PREVIEW_LINES +1，因底部截断标记更紧凑）
 
   /** 生成工具 call 行（对齐 TUI renderCall：加粗工具名 + accent pattern + 灰参数）。 */
   function buildToolCallEl(toolName, argStr) {
@@ -4919,9 +4986,19 @@
     // “有没有可接着往下走的对话”只看用户与助手两种消息：会话里那些系统消息
     //（正在压缩、已回滚那一类）不能算 —— 空会话里摆一颗“继续”没意义。
     const touched = st.paneEl.querySelector(".msg.user, .msg.assistant");
+    // 露哪一面只看阶段（见 src/sessionPhase.ts）：
+    //   加载中 / 压缩中：不露面（这会儿“继续”发不出去，也没有可停的一轮）；
+    //   在跑（等字 / 在写 / 在想 / 工具在跑）：「卡住了」；
+    //   闲着有内容：「继续」。
+    const phase = phaseOf(st);
+    // “没配模型”那一档只在后端真给了阶段时才算数（老后端 / 测试里塞进来的会话对象常常没这个字段，
+    // 那时候照老样子给「继续」）
+    const authoritative = typeof st.phase === "string" && st.phase !== "";
+    const hidden = phase === "loading" || phase === "compacting" || phase === "starting"
+        || (authoritative && phase === "nomodel");
     const mode = (!st.piReady || !touched) ? ""
-        : st.streaming ? "stuck"
-            : st.loading ? "" : "continue";
+        : hidden ? ""
+            : busyOf(st) ? "stuck" : "continue";
     const row = st.endHintRow || (st.endHintRow = makeEndHintRow(st));
     const el = st.endHintEl;
     if (el.dataset.mode !== mode) { setEndHintMode(el, mode); }
@@ -5093,6 +5170,39 @@
   // 它说的是当前会话（一次只看一个）：切会话、模型变了、用量变了、速度涨了都调 syncStatus 重刷。
   // 还没就绪的几种状态另挂在模型名那颗按钮的 data-st 上（loading / wait / nomodel / idle / streaming），
   // dev/ 那套调试工具靠它判断“可以发消息了”与“这轮跑完没”。
+  /**
+   * 这个会话的阶段（见 src/sessionPhase.ts）。
+   *
+   * 正常情况下就是后端推来的那一个（sessionList 与 phaseChanged）；这里只在字段缺失时
+   * 按老那套字段兜一下 —— 插件与后端是分开升级的，两边不一定同一版。
+   */
+  function phaseOf(st) {
+    if (!st) { return "none"; }
+    if (typeof st.phase === "string" && st.phase) { return st.phase; }
+    if (st.loading) { return "loading"; }
+    if (!st.piReady) { return "starting"; }
+    if (!st.modelId) { return "nomodel"; }
+    if (!st.streaming) { return "idle"; }
+    if (st.activity === "thinking") { return "thinking"; }
+    if (st.activity === "tool") { return "tool"; }
+    return st.currentAssistant ? "writing" : "waiting";
+  }
+
+  /** 这个阶段算不算“没干完”（顶条那颗点呼吸、关会话要问第二遍、末尾那颗写「卡住了」）。 */
+  function busyOf(st) {
+    if (!st) { return false; }
+    if (typeof st.busy === "boolean") { return st.busy; }
+    if (typeof st.phase === "string" && st.phase) {
+      switch (st.phase) {
+        case "loading": case "compacting": case "waiting": case "writing":
+        case "thinking": case "tool": return true;
+        default: return false;
+      }
+    }
+    // 老后端 / 测试里塞进来的会话对象（什么都没有）：照老那套判 —— 顶条以前就是看这两样
+    return !!(st.streaming || st.loading);
+  }
+
   function ctxPercent(st) {
     if (!st || typeof st.percent !== "number") { return 0; }
     return Math.max(0, Math.min(100, st.percent));
@@ -5100,21 +5210,30 @@
   function ctxState(st) {
     // 一个会话都没有（刚打开页面，还等着在「项目与会话」里挑一个）：胶囊里只写“没有会话”
     if (!st) { return "none"; }
-    if (st.loading) { return "loading"; }
-    if (!st.piReady) { return "wait"; }
-    if (!st.modelId) { return "nomodel"; }
-    return st.streaming ? "streaming" : "idle";
+    // 阶段 → data-st：取值跟以前一模一样（none / loading / wait / nomodel / idle / streaming），
+    // dev/ 那套调试工具靠它判断“可以发消息了”“这轮跑完没”，不许改名。
+    switch (phaseOf(st)) {
+      case "none": return "none";
+      case "loading": return "loading";
+      case "starting": return "wait";
+      case "nomodel": return "nomodel";
+      case "idle": return "idle";
+      default: return "streaming";
+    }
   }
   function ctxTitle(st) {
     if (!st) { return "还没有会话（在右边的「项目与会话」里挑一个工作区开始）"; }
-    const state = ctxState(st);
-    if (state === "loading") { return "加载中…"; }
-    if (state === "wait") { return "等待 pi 启动…"; }
-    if (state === "nomodel") { return "未配置模型（点击选择）"; }
+    const phase = phaseOf(st);
+    if (phase === "loading") { return "加载中…"; }
+    if (phase === "starting") { return "等待 pi 启动…"; }
+    if (phase === "nomodel") { return "未配置模型（点击选择）"; }
+    if (phase === "compacting") { return "正在压缩上下文…"; }
     const parts = [modelFullFor(st)];
     if (typeof st.percent === "number") { parts.push("上下文 " + st.percent.toFixed(1) + "%"); }
     if (typeof st.tps === "number") { parts.push(st.tps.toFixed(1) + " t/s"); }
-    return parts.join(" · ") + "\n点击切换模型";
+    // 有一道题挂着等你答：模型这一轮就停在那儿，说一句免得人以为它卡了
+    const waitingOnYou = st.attention === "answer" ? "\n模型在等你答一句" : "";
+    return parts.join(" · ") + waitingOnYou + "\n点击切换模型";
   }
   /**
    * 顶边那条上写的模型名（状态图右边那条横杠不在这里，它只管名字）。
@@ -5139,16 +5258,14 @@
     const state = ctxState(st);
     ctxIconEl.dataset.st = state;
     // 跑着的时候再细一层，挂到 data-act 上（界面按它换形象，见 chat.css 那几条）：
-    //   thinking 后端说在想；tool 后端说工具在跑；
-    //   剩下那种后端只说 working 的，界面再分两面：正文正在流（写）与还没吐字（等）。
-    //   “正文在流”看 st.currentAssistant：它在第一条正文增量时建、这段吐完就清（见 assistantDelta /
-    //   finalizeCurrentAssistant），所以正好就是“笔在写”的那段时间。
-    const act = st ? st.activity : "";
-    const writing = !!(st && st.currentAssistant);
+    //   以前是界面自己分（activity + 正文有没有在流），现在全看后端算好的阶段；
+    //   多出来两档：compacting（压缩上下文）与 answer（有一道题在等你答）。
+    const phase = phaseOf(st);
     const wantAct = state !== "streaming" ? ""
-        : act === "thinking" ? "thinking"
-            : act === "tool" ? "tool"
-                : writing ? "writing" : "waiting";
+        : st.attention === "answer" ? "answer"
+            : phase === "thinking" ? "thinking"
+                : phase === "tool" ? "tool"
+                    : phase === "writing" ? "writing" : "waiting";
     // 状态至少显示这么久才准换：正文吐完那一下会冒出“等”，几十毫秒后又变成工具；
     // 不挡一下就看着抖。等不到那一下的（本来就是空、或者这一轮停了）立即生效。
     let shown = st ? st.actShown || "" : "";
@@ -5367,7 +5484,9 @@
    * 其余不显示。
    */
   function openDotClass(item) {
-    if (item.streaming || item.loading || item.bashRunning) { return " running"; }
+    // 在跑：只认阶段（见 src/sessionPhase.ts）与后台命令 —— 以前是 streaming / loading 自己拼，
+    // 压缩中漏在外头，看不到“它在忙”。
+    if (item.busy || item.bashRunning) { return " running"; }
     if (item.taba && item.taba.state === "error") { return " error"; }
     if (item.turnDone || (item.taba && item.taba.state === "waiting")) { return " done"; }
     return "";
@@ -5390,6 +5509,9 @@
         section: "正在对话",
         current: st.id === activeId,
         streaming: !!st.streaming,
+        busy: busyOf(st),
+        attention: st.attention || "",
+        phase: phaseOf(st),
         bashRunning: !!st.bashRunning,
         loading: !!st.loading,
         turnDone: !!st.turnDone,
@@ -6355,7 +6477,9 @@
   /** 这个会话算不算“还在干活”（顶条那颗 × 要先问一下）：这一轮在答，或者后台还有命令在跑。 */
   function sessionRunning(id) {
     const st = id ? sessions.get(id) : null;
-    return !!(st && (st.streaming || st.bashRunning));
+    // 跟顶条那颗点同一个判据（阶段 + 后台命令）：以前这里只看 streaming，
+    // 于是“加载中”“压缩中”那一格蓝着、点 × 却一下就关了，不问。
+    return !!(st && (busyOf(st) || st.bashRunning));
   }
 
   /** 关一个会话：这一下就走（会话文件留着，历史列表里能重新打开；
@@ -6765,6 +6889,9 @@
     view.footer.classList.remove("pk-history-footer");
     const leftoverClose = view.root.querySelector(".pk-header-close");
     if (leftoverClose) { leftoverClose.remove(); }
+    // 文件夹那一层顶上那条工具条也一起摘（重开时由 paintFolderChrome 重新画）
+    const leftoverTools = view.panel ? view.panel.querySelector(".pk-folder-tools") : null;
+    if (leftoverTools) { leftoverTools.remove(); }
     // 筛选框收起来（骨架里默认就是藏着的，见 renderHtml）：只有真要筛的面板（选模型）画的时候才露
     if (view.searchWrap) { view.searchWrap.classList.add("hidden"); }
     // “关闭会话”的确认条只在列表里有效：列表一关就撤销（下次打开不要停在确认态）
@@ -6831,6 +6958,35 @@
   /** 有没有浮层正占着屏幕（常驻那一列不算：它不遮对话，Esc / 方向键也不归它）。 */
   function pickerModalOpen() {
     return !!modalView.state && !modalView.root.classList.contains("hidden");
+  }
+
+  /**
+   * Esc 归谁：从上往下数，第一个开着的就是它。
+   *
+   * 这条键以前只靠“谁先注册监听”排先后，而且每个监听里各自再写一遍 if：于是有两处打架
+   * 一直没人发现 —— 设置面板压根没接这条键（在里面按 Esc 落到“中止这一轮”那条去，
+   * 正在跑的生成被掐），工具耗时 / 工具两个弹窗的监听注册在中止那条之后（那一按既关弹窗
+   * 又中止这一轮）。现在所有跟 Esc 有关的监听都问这一句，顺序只在这一处写：
+   *
+   *   看图那一层（整页黑底，最上面）
+   *   设置面板
+   *   工具调用耗时 / 工具（两个弹窗）
+   *   文件搜索（它可能开在浮层上面：先收它，再按一下才收浮层）
+   *   浮层（选模型 / 选文件夹 / 历史 / 项目与会话 / 确认框）
+   *   看文件的弹窗
+   *   空串：谁也没开着（那一按归“中止这一轮”，跟 pi 的 TUI 一样）
+   *
+   * 写坏的输入框（改名 / 新建文件夹 / 设置里那两行）在自己身上把键吃掉，走不到这儿。
+   */
+  function escTopLayer() {
+    if (lightboxEl && !lightboxEl.classList.contains("hidden")) { return "lightbox"; }
+    if (settingsOverlay && !settingsOverlay.classList.contains("hidden")) { return "settings"; }
+    if (toolStatsOpen()) { return "stats"; }
+    if (envOpen()) { return "env"; }
+    if (fileSearch.open) { return "search"; }
+    if (pickerModalOpen()) { return "picker"; }
+    if (fileViewing()) { return "viewer"; }
+    return "";
   }
 
   /** 按“要不要常驻”摆版面：宽窗且没收起时，右边留出那一列（CSS 看 body.dock-sidebar）。 */
@@ -9732,11 +9888,12 @@
       syncFileBar();
       vscode.postMessage({ type: "revertChange", sessionId: activeId, path: entry.path });
     });
-    // Esc 也能关掉弹窗（浮层、清单开着的时候不接：那会儿 Esc 是收那一层）
+    // Esc 也能关掉弹窗（从下往上数：上面还开着别的东西时先收那一个，见 escTopLayer）
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !fileViewing()) { return; }
-      if (pickerModalOpen() || fileSearch.open) { return; }
+      if (e.key !== "Escape") { return; }
+      if (escTopLayer() !== "viewer") { return; }
       e.preventDefault();
+      e.stopImmediatePropagation();
       closeFileViewer();
     });
     // 电脑上那一块浮在页面上：点它外面（对话、顶条、输入框……）就收起来，跟那颗叉、Esc 一个结果。
@@ -9867,14 +10024,8 @@
       }
       scheduleFileSearch();
     });
+    // Esc 不在这儿接：那条键由 document 上那个监听统一收（见上面「文件搜索那块浮层也一样」）
     fileSearch.input.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        // 先就地把这条 Esc 吃掉：外面 document 上的监听会拿它去中止正在生成的那一轮
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        closeFileSearch();
-        return;
-      }
       if (e.key === "ArrowDown") { e.preventDefault(); moveFileSearchSel(1); return; }
       if (e.key === "ArrowUp") { e.preventDefault(); moveFileSearchSel(-1); return; }
       if (e.key === "Enter") { e.preventDefault(); chooseFileSearchItem(fileSearch.sel); }
@@ -10658,6 +10809,10 @@
         el.appendChild(main);
         el.title = item.folderPath || item.label || "";
       } else if (st.kind === "folders") {
+        // 这一层里只有目录是“清单上的一行”。宿主要求的那三件事（往上一层 / 新建文件夹 /
+        // 就用这个目录）不往清单里摆：往上走与新建是工具（画在顶上那条工具条里），
+        // “就用这个目录”是这一层的确认（画在底部主按钮上，见 paintFolderChrome）。
+        if (item.newFolder || item.icon === "up" || item.icon === "check") { return; }
         // 文件夹行按资源管理器的样子画：行首一格图标 + 名字一行。
         // 正在看的是哪个目录写在标题下面那行小字里（宿主的 subtitle），行里不再重复。
         el.classList.add("pk-history");
@@ -10940,11 +11095,110 @@
     hidePicker(view);
     vscode.postMessage({ type: "pickerChoice", kind: "model", payload });
   }
+  /**
+   * 工具条上那颗「新建文件夹」：在清单最上面就地摊一个输入框（不关面板、不另开一层），
+   * 名字敲好回车才交给宿主去建（见 chatHost.ts 的 createFolderThenPick），Esc 或者点到别处就收起来。
+   *
+   * 建在哪个目录跟着宿主那一行走（item.folderPath，绝对路径），界面不去解析标题下面那行小字。
+   * 输入框里那几下键不许冒到 document 上：面板那一层认 Esc 是“收起整个浮层”，在这里 Esc 只收这个框。
+   * 建好 / 没建成时宿主都会重新列一遍这一层，面板整份重画，这个框跟着没了。
+   */
+  function showNewFolderInput(view, item) {
+    if (!view.body) { return; }
+    // 已经摊着了：把光标放回去就行（再点一下那颗按钮不该多摊一个框）
+    const there = view.body.querySelector(".pk-newfolder-input-row input");
+    if (there) { there.focus(); return; }
+    const holder = document.createElement("div");
+    holder.className = "pk-item pk-history pk-newfolder-input-row";
+    const main = document.createElement("div"); main.className = "pk-history-main";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "sn-rename";        // 跟那一行改名共用一个样子（见 chat.css 的 .sn-rename）
+    input.placeholder = "新文件夹的名字";
+    input.maxLength = NEW_FOLDER_MAX_CHARS;
+    input.spellcheck = false;
+    // 框里点、选字、双击都不算“选了那一行”
+    ["click", "dblclick", "mousedown", "pointerdown"].forEach((type) => {
+      input.addEventListener(type, (e) => { e.stopPropagation(); });
+    });
+    // 收起这个框（Esc、点到别处、宿主重画这一层都走这里）。那个输入框正拿着焦点，
+    // 把它从树上摘下来这一下本身会触发 blur，又回到这里一次：记一笔，只收一次。
+    let closed = false;
+    const dismiss = () => {
+      if (closed) { return; }
+      closed = true;
+      if (holder.parentNode) { holder.parentNode.removeChild(holder); }
+    };
+    let sent = false;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); dismiss(); return; }
+      if (e.key !== "Enter" || sent) { return; }
+      e.preventDefault(); e.stopPropagation();
+      const name = input.value.trim();
+      if (!name) { return; }   // 空着回车 = 什么也不做（框还在这儿，接着敲）
+      sent = true;             // 宿主回来以前不再发：一格名字不该建出两个目录
+      vscode.postMessage({ type: "newFolder", path: item.folderPath || "", name });
+    });
+    input.addEventListener("blur", dismiss);
+    main.appendChild(input);
+    holder.appendChild(main);
+    // 摊在清单最上面（就在那条工具条底下）：新建出来的目录也在这一层里，眼睛不用找
+    view.body.insertBefore(holder, view.body.firstChild);
+    input.focus();
+  }
+
+  /**
+   * 「选择文件夹」这一层的工具条与底部那两颗按钮（清单里只有目录，见 renderPickerRows）。
+   *
+   * 宿主照旧把「上一层 / 新建文件夹 / 就用这个目录」当三行发过来，这里只换它们长在哪儿：
+   *   · 上一层（包括 Windows 上回到盘符列表那一行）→ 工具条左边那颗 `↑`，悬停提示用宿主给的那句话；
+   *     最上层没有这一行，那颗就不露面；
+   *   · 新建文件夹 → 工具条右边那颗（加号 + 名字）；
+   *   · 就用这个目录 → 底部那颗主按钮（这一层读不出来时没有那一行，就只剩「取消」）。
+   * 三样都没有（盘符那一层）时整条工具条不画，免得白留一道线。
+   */
+  function paintFolderChrome(view) {
+    const st = view.state;
+    const panel = view.panel;
+    if (!panel) { return; }
+    const old = panel.querySelector(".pk-folder-tools");
+    if (old) { old.remove(); }
+    if (!st || st.kind !== "folders") { return; }
+    const up = st.items.find((it) => it.icon === "up") || null;
+    const add = st.items.find((it) => it.newFolder) || null;
+    if (!up && !add) { return; }
+    const tools = document.createElement("div");
+    tools.className = "pk-folder-tools";
+    if (up) {
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "pk-folder-up";
+      btn.title = up.label || "上一层";
+      btn.setAttribute("aria-label", up.label || "上一层");
+      btn.innerHTML = ICONS["arrow-up"];
+      btn.addEventListener("click", () => confirmPicker(up, view));
+      tools.appendChild(btn);
+    } else {
+      tools.appendChild(document.createElement("span"));   // 占着左边这一块，新建那颗仍然靠右
+    }
+    if (add) {
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "pk-folder-new";
+      btn.title = "在这个目录里新建一个文件夹";
+      btn.innerHTML = ICONS.add + "<span>新建文件夹</span>";
+      btn.addEventListener("click", () => showNewFolderInput(view, add));
+      tools.appendChild(btn);
+    }
+    panel.insertBefore(tools, view.subtitle.nextSibling);
+  }
+
   function confirmPicker(item, view = modalView) {
     const st = view.state; if (!st) { return; }
     if (st.kind === "model") { submitModelPicker(view); return; }
     if (!item) { return; }
     const kind = st.kind;
+    // 工具条上那颗「新建文件夹」（清单里已经没有那一行了，见 paintFolderChrome）：
+    // 点它就摊一个输入框，名字敲好回车才发给宿主。
+    if (item.newFolder) { showNewFolderInput(view, item); return; }
     // 常驻那一列里点一行 = “用一下”，不是“选完就走”：面板留着接着点下一行
     const closeFirst = () => { if (!view.keepOpen) { hidePicker(view); } };
     if (st.toggle || item.behavior === "toggle") {
@@ -11445,6 +11699,22 @@
         openEnv();
       });
       view.footer.appendChild(envBtn);
+    } else if (kind === "folders") {
+      // 文件夹那一层：底部就是这一层的两个决定 ——「取消」与「就在这里新建会话」。
+      // 后者用的还是宿主发来的「就用这个目录」那一行；这一层读不出来时没那一行，就只剩取消。
+      view.footer.classList.remove("hidden");
+      const cancelBtn = document.createElement("button");
+      cancelBtn.type = "button"; cancelBtn.className = "secondary"; cancelBtn.textContent = "取消";
+      cancelBtn.addEventListener("click", () => cancelPicker(view));
+      view.footer.appendChild(cancelBtn);
+      const use = view.state.items.find((it) => it.icon === "check");
+      if (use) {
+        const useBtn = document.createElement("button");
+        useBtn.type = "button"; useBtn.className = "primary"; useBtn.textContent = "就在这里新建会话";
+        useBtn.title = use.label || "";
+        useBtn.addEventListener("click", () => confirmPicker(use, view));
+        view.footer.appendChild(useBtn);
+      }
     } else if (toggle) {
       view.footer.classList.remove("hidden");
       const closeBtn = document.createElement("button"); closeBtn.className = "secondary"; closeBtn.textContent = "关闭";
@@ -11465,6 +11735,9 @@
     }
     if (toDock) { sidebarAsked = false; }
     syncSidebarLayout();
+    // 文件夹那一层的工具条（往上走 / 新建文件夹）：清单里只有目录，那两件事画在顶上（见 paintFolderChrome）；
+    // 换成别的浮层时顺手把它摘掉
+    paintFolderChrome(view);
     // 「项目与会话」按格画：两格都在时只动真的变了的那一格（见 paintWorkspacePanel）；其余面板整份画
     if (kind === "workspace") { paintWorkspacePanel(view); } else { renderPickerItems(view); }
     // 计时：若宿主回显了 t0，输出点击 → picker 可见的往返耗时（多 panel 卡顿排查用）
@@ -11492,16 +11765,24 @@
   });
   // 浮层的列表只用鼠标 / 触摸点：没有「方向键上下选行、回车打开那一行」那一套，
   // 「切换模型」那层里的左右键换推理档位也一并去了。这里只剩 Esc：收回这一层。
-  // 收之前得先把这条按键就地处掉：后面那个 document 上的监听会用 Esc 中止正在生成的那一轮，
-  // 它开头那句“浮层开着就跳开”的判断这会儿已经被 cancelPicker 改掉了
-  // （两个监听都在 document 上，按注册顺序跑，靠 stopImmediatePropagation 拦下来才管用）。
+  // 收之前得先把这条按键就地处掉：后面那个 document 上的监听会用 Esc 中止正在生成的那一轮。
+  // 谁在上面谁先收，顺序只在 escTopLayer 里写（搜索开在浮层上面时，先收搜索）。
   document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape" || !pickerModalOpen()) { return; }
+    if (e.key !== "Escape" || escTopLayer() !== "picker") { return; }
     e.preventDefault();
     e.stopImmediatePropagation();
     closePickerAnyway();
   });
-
+  // 文件搜索那块浮层也一样：Esc 收回它，跟点外面、点头上那颗叉一个结果。
+  // 这条监听挂在 document 上、不挂那个输入框：点了「内容」那颗按钮、或者点了面板别处，
+  // 焦点就不在输入框里了，那会儿这条键得照样管用（挂在输入框上的话它会落到下面那个
+  // 「Esc 中止正在生成的一轮」的监听上，浮层还开着，顺手把这一轮掐了）。
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || escTopLayer() !== "search") { return; }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    closeFileSearch();
+  });
 
   // ==================== @ 文件引用 ====================
   let fileMatches = [];
@@ -11906,7 +12187,8 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") { return; }
-    if (pickerModalOpen()) { return; }
+    // 屏幕上还开着谁（浮层 / 设置 / 两个弹窗 / 看文件 / 看图）：这一条键归它，这里不中止
+    if (escTopLayer()) { return; }
     // 输入框聚焦时由 inputEl 的 keydown 处理（含文件菜单关闭 / 中止）
     if (document.activeElement === inputEl) { return; }
     // 消息流或其他区域聚焦 → 中止流式生成
@@ -11934,11 +12216,9 @@
     }
     // 复刻 pi TUI：流式生成中按 ESC 中止（文件菜单关闭时生效）
     if (e.key === "Escape") {
-      // 浮层开着的时候这条键归浮层（收回它）：别顺手把正在生成的那一轮也中止了。
-      // 这里只管“不中止”，收回浮层由 document 上那个监听做。
-      if (pickerModalOpen()) { return; }
-      // 看文件（或 diff）的弹窗开着：这条键归那个弹窗（关掉它，见 buildFileSidebar）
-      if (fileViewing()) { return; }
+      // 屏幕上还开着谁（浮层 / 设置 / 两个弹窗 / 看文件 / 看图）：这一条键归它，这里不中止。
+      // 以前这里一条一条列着判（而且漏了设置、工具耗时、工具这三块），顺序靠“谁先注册”。
+      if (escTopLayer()) { return; }
       if (abortActiveTab()) { e.preventDefault(); }
       return;
     }
@@ -12004,6 +12284,26 @@
     if (activeId === st.id) { syncStatus(); }
     refreshOpenSessionsInPicker();
   }
+
+  /**
+   * 后端说这个会话的阶段变了（见 src/sessionPhase.ts）：存下来，五个地方跟着刷一遍。
+   *
+   * 界面不再自己从 activity / 正文有没有在流去拼阶段 —— 那些是后端的事，它那边才看得全
+   *（压缩中、有一道题在等你答，这两档界面以前根本看不见）。
+   */
+  function setPhase(st, phase, busy, attention) {
+    if (!st) { return; }
+    const nextAttention = typeof attention === "string" ? attention : st.attention;
+    const nextBusy = typeof busy === "boolean" ? busy : undefined;
+    if (st.phase === phase && st.attention === nextAttention && st.busy === nextBusy) { return; }
+    st.phase = phase;
+    st.busy = nextBusy;
+    st.attention = nextAttention;
+    if (activeId === st.id) { updateSendState(); syncStatus(); }
+    renderSessionBar();
+    syncEndHint(st);
+    refreshOpenSessionsInPicker();
+  }
   function setPiReady(st, on, force) {
     st.piReady = on;
     if (activeId === st.id) { updateSendState(); syncStatus(); }
@@ -12051,7 +12351,11 @@
         st.parentId = s.parentId || null;
         // pi 起的标题（没有就空串）；界面上显示名字的地方一律走 sessionLabel()
         st.piTitle = typeof s.title === "string" ? s.title : "";
-        st.streaming = !!s.streaming;
+        // 这一轮在不在跑：变了就走 setStreaming —— 它顺带收掉「正在跑的那一条」、
+        // 灭掉那颗绿点、补上这一轮没画的那一截。以前这里直接赋值，断线期间跑完再回来，
+        // 那条冻住的命令还挂在消息流末尾。
+        const incomingStreaming = !!s.streaming;
+        if (st.streaming !== incomingStreaming) { setStreaming(st, incomingStreaming); }
         st.bashRunning = !!s.bashRunning;
         const incomingActivity = s.activity;
         st.activity = incomingActivity === "working" || incomingActivity === "thinking" || incomingActivity === "tool" || incomingActivity === "idle"
@@ -12060,6 +12364,11 @@
         st.activityDetail = typeof s.activityDetail === "string" ? s.activityDetail : "";
         st.piReady = s.piReady !== false;
         st.loading = !!s.loading;
+        // 阶段以快照为准（见 src/sessionPhase.ts）：断线重连、刷新页面之后靠它补回来。
+        // 字段缺失时清掉本地那份，下面一律走 phaseOf 的兵底（插件与后端分开升级，不一定同一版）。
+        st.phase = typeof s.phase === "string" ? s.phase : "";
+        st.busy = typeof s.busy === "boolean" ? s.busy : undefined;
+        st.attention = typeof s.attention === "string" ? s.attention : "";
         // 自动模式：每次列表都带一份（跟模型名一样，是一次性推送的补位）——
         // 刷新页面 / 重连后那颗按钮亮不亮就靠它回来。
         st.auto = s.auto || null;
@@ -12406,6 +12715,11 @@
         // 离开「思考中」就说明这一段想完了：个别 provider 不发 thinking_end 时在这里兜底收尾
         if (msg.activity !== "thinking") { endThinking(t, ""); }
         break;
+      case "phaseChanged":
+        // 后端算好了阶段（见 src/sessionPhase.ts）：存下来，五个地方一起刷
+        //（模型胶囊、顶边那颗小图、顶条那颗点、末尾那颗胶囊、关会话要不要问第二遍）
+        setPhase(t, msg.phase, msg.busy, msg.attention);
+        break;
       case "assistantDelta":
         if (!t.currentAssistant) {
           t.currentAssistant = { el: addMarkdown(t, ""), raw: "" };
@@ -12441,8 +12755,7 @@
       }
       case "thinkingFull":
         // 想完一段：整段文本随 pi 的 thinking_end 过来（历史重放也只来这一条），见 endThinking。
-        // 正在往暂存区补更早的历史（t._stage）时另开一条，别动手头正在想的那一条。
-        endThinking(t, msg.text, !!t._stage, msg);
+        endThinking(t, msg.text, msg);
         break;
       case "tool": {
             finalizeCurrentAssistant(t);
@@ -12547,7 +12860,7 @@
         // 「加载更早」那批也作废（会话已换，再插进去就串了），置个丢弃标记等 End 来清
         t._historyBtn = null;
         t.hasMoreHistory = false;
-        if (t._stage) { t._stage = null; t._stageDropped = true; }
+        if (t._stage) { t._stage = null; t._stageDropped = true; dropStageCursors(t); }
         // 后端可能在 loading 状态中再次 clear（例如切换完成后重绘消息），
         // 不能因此把进行中的加载反馈一并清掉。
         syncSessionLoading(t);
@@ -12813,14 +13126,12 @@
         inner.sessionId = msg.sessionId;
         const realPane = t.paneEl;
         const savedStick = t.stickToBottom;
-        const savedSegmentThink = t.segmentThinking;   // 暂存区自己算自己的，别动本段那颗与末尾候选
-        const savedTailThink = t.tailThinking;
         t.paneEl = t._stage;
+        // 一整批只存一次游标：第一条进来时存，historyBatchEnd 时还（见 STAGE_CURSORS）
+        if (!t._stageCursors) { t._stageCursors = takeStageCursors(t); }
         try { applyPanelMessage(inner); }
         finally {
           t.paneEl = realPane;
-          t.segmentThinking = savedSegmentThink;
-          t.tailThinking = savedTailThink;
           // 渲染进暂存区时的滚动状态调整（scrollToBottom 等）不该影响真实窗格
           t.stickToBottom = savedStick;
         }
@@ -12828,6 +13139,10 @@
       }
       case "historyBatchEnd":
         flushHistoryBatch(t, msg.hasMore === true, typeof msg.hidden === "number" ? msg.hidden : 0);
+        // 补完了：这个会话又回到“眼下正在跑”的那一边。不回复这一句的话，fromHistory 就一直
+        // 是 true——之后新长出来的工具调用会被当作老消息（不记开始时刻，「正在跑的那一条」
+        // 末尾不写耗时，几条同时跑时也认不准该露哪一条）。
+        t.fromHistory = false;
         // 历史补完：末尾那颗胶囊重新算一次（补进来的老消息在顶上，不影响它）
         syncEndHint(t);
         break;
@@ -12835,6 +13150,16 @@
   }
 
   // ==================== 历史窗口（网页端「只发最近一段历史」） ====================
+
+  /**
+   * 往暂存区（"加载更早"那一批、见 case "historyBatchEvent"）里画的时候，把“现在这一批”那几样游标
+   * 整组存起来、换成空的（见 STAGE_CURSORS），画完再还（见 flushHistoryBatch）。
+   * 批开到一半就作废了（中途整屏重画 / 换会话）也走这个：不还的话，这批存的那份就永远挂在会话上了。
+   */
+  function dropStageCursors(st) {
+    putStageCursors(st, st && st._stageCursors);
+    if (st) { st._stageCursors = null; }
+  }
 
   /**
    * 顶部「加载更早的消息」按钮。
@@ -12874,6 +13199,31 @@
   }
 
   /**
+   * 往暂存区里画更早的历史时，这几样要整组存起来、换成空的，画完再还（两条道共用：
+   * 「加载更早」那批（见 case "historyBatchEvent"）与窗格顶上那截搬出来的（见 fillOlder））。
+   *
+   * 为什么一样都不能少：这几样都是“现在这一批落在哪儿 / 这一批各叫了几次 / 正在写的正文 /
+   * 正在想的那条”，它们不是按窗格找的 —— 不存还的话，暂存区里画出来的东西会把它们抢走：
+   * 更早那批画完被插到窗格顶上以后，后面实时长出来的调用就全接到顶上那行去了
+   *（上面那行的次数越攒越多、「正在跑」那条也跟着跑到上面，看着就是“命令顺序乱了”）。
+   * 以后再加这种游标，加到这张表里就行，别再回到各存各的。
+   */
+  const STAGE_CURSORS = ["currentToolTail", "toolGroups", "currentAssistant", "thinkingEntry", "pendingThink", "segmentThinking", "tailThinking"];
+
+  /** 存下这几样、现场换成空的（暂存区自己从头算）。 */
+  function takeStageCursors(st) {
+    const saved = {};
+    for (const k of STAGE_CURSORS) { saved[k] = st[k]; st[k] = null; }
+    return saved;
+  }
+
+  /** 画完了（或者半路作废了）：把这几个游标交回“现在这一批”。 */
+  function putStageCursors(st, saved) {
+    if (!st || !saved) { return; }
+    for (const k of STAGE_CURSORS) { st[k] = saved[k]; }
+  }
+
+  /**
    * 「加载更早」那批消息渲染完了：把暂存区的内容整体插到按钮下方，
    * 并把滚动位置补回去，让视野还停在原来那几条消息上。
    * 会话在加载途中被切换过（clear 已把暂存区作废）就不插了。
@@ -12881,6 +13231,9 @@
   function flushHistoryBatch(t, hasMore, hidden) {
     const stage = t._stage;
     t._stage = null;
+    // 这批画完了：游标交回“现在这一批”（见 STAGE_CURSORS；一整批只存一次，见 case "historyBatchEvent"）
+    putStageCursors(t, t._stageCursors);
+    t._stageCursors = null;
     const dropped = t._stageDropped === true;
     t._stageDropped = false;
     if (dropped) {
@@ -13184,17 +13537,14 @@
       const take = split.take;
       st.older = split.rest;
       // 这几个说的是“窗格末尾那一批”的落脚点（工具行 / 图块 / 那段思考），画老消息时
-      // 不能让它们被改掉：另存一份，画完还回去。currentToolTail 置空让老消息自己另起一行。
+      // 不能让它们被改掉：整组存下来、换成空的，画完还回去（见 STAGE_CURSORS）。
       const stage = document.createElement("div");
-      const saved = {
-        pane: st.paneEl, stage: st._stage, stick: st.stickToBottom,
-        tail: st.currentToolTail, asst: st.currentAssistant, think: st.thinkingEntry,
-        seg: st.segmentThinking, tailThink: st.tailThinking, groups: st.toolGroups,
-      };
+      const savedPane = st.paneEl;
+      const savedStage = st._stage;
+      const savedStick = st.stickToBottom;
+      const savedCursors = takeStageCursors(st);
       st._stage = stage;
       st.paneEl = stage;
-      st.currentToolTail = null;
-      st.toolGroups = null;
       try {
         for (const item of take) {
           // 搬出来收着的那一截：原样挂回去（不重画）
@@ -13205,15 +13555,10 @@
           }
         }
       } finally {
-        st.paneEl = saved.pane;
-        st._stage = saved.stage;
-        st.stickToBottom = saved.stick;
-        st.currentToolTail = saved.tail;
-        st.currentAssistant = saved.asst;
-        st.thinkingEntry = saved.think;
-        st.segmentThinking = saved.seg;
-        st.tailThinking = saved.tailThink;
-        st.toolGroups = saved.groups;
+        st.paneEl = savedPane;
+        st._stage = savedStage;
+        st.stickToBottom = savedStick;
+        putStageCursors(st, savedCursors);
       }
       if (!stage.childNodes.length) { dropOlderHintIfEmpty(st); return; }
       // 尺子：原来最上面那条消息现在在视野里的位置。补完按它放回去（同 flushHistoryBatch）。
@@ -13324,12 +13669,31 @@
     cancelFlush(st);
     if (st.viewRaf) { cancelAnimationFrame(st.viewRaf); st.viewRaf = 0; }
     if (st.viewTimer) { clearTimeout(st.viewTimer); st.viewTimer = 0; }
+    // 这几只定时器以前没清：后台命令那只看“那一块还在不在”，而 viewEl.remove() 只把整棵树
+    // 从文档上摘下来、它爸还在 —— 于是关掉一个带后台命令的会话，那只钟每半秒空转一辈子；
+    // 整屏重画那只 8 秒后会把已经关掉的会话重新造出来（见 finishRedraw → flushReplayBuf）；
+    // 搬老消息、换那颗小图形形象的两只同理。
+    stopBashClock(st);
+    if (st.trimTimer) { clearTimeout(st.trimTimer); st.trimTimer = 0; }
+    if (st.actTimer) { clearTimeout(st.actTimer); st.actTimer = 0; }
+    if (st.redrawTimer) { clearTimeout(st.redrawTimer); st.redrawTimer = null; }
     dropRunningLine(st);   // 那条「正在跑」的定时器与耗时那只钟（见 startRunClock）一并停掉
     for (const tg of st.pendingToolTags.values()) { clearInterval(tg._timer); }
+    const wasActive = activeId === id;
     st.viewEl.remove();
     sessions.delete(id);
     sessionDrafts.delete(id);
-    if (activeId === id) { activeId = null; syncJumpBottom(st); syncComposerButtons(); }
+    if (wasActive) {
+      // 这个会话没了（别的窗口关的 / 自己点的叉）：长在它身上的那两块也跟着收起来。
+      // 不收的话屏幕上就留着一份“这个会话的文件”：看文件的弹窗、改动层，点回滚没人接
+      // （那个会话在后端已经不在了，消息被丢掉，看着就是“点了没反应”）。
+      closeFileViewer();
+      closeChangeSheet();
+      fileTabsBySession.delete(id);
+      activeId = null;
+      syncJumpBottom(st);
+      syncComposerButtons();
+    }
   }
 
   // ==================== 工具调用耗时（侧边栏底部那颗「统计」）====================
@@ -13470,9 +13834,9 @@
     // 点外面收起来；右上角那颗叉同理
     toolStatsOverlay.addEventListener("click", (e) => { if (e.target === toolStatsOverlay) { closeToolStats(); } });
     if (toolStatsCloseBtn) { toolStatsCloseBtn.addEventListener("click", closeToolStats); }
-    // Esc 收起来：捕获阶段就地处掉，别让它顺手中止正在生成的那一轮（跟别的浮层一个道理）
+    // Esc 收起来：谁在上面谁先收（见 escTopLayer），就地处掉，别让它顺手中止正在生成的那一轮
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !toolStatsOpen()) { return; }
+      if (e.key !== "Escape" || escTopLayer() !== "stats") { return; }
       e.preventDefault();
       e.stopImmediatePropagation();
       closeToolStats();
@@ -13633,9 +13997,9 @@
     // 点外面收起来；右上角那颗叉同理
     envOverlay.addEventListener("click", (e) => { if (e.target === envOverlay) { closeEnv(); } });
     if (envCloseBtn) { envCloseBtn.addEventListener("click", closeEnv); }
-    // Esc 收起来：跟别的浮层一样在捕获阶段就地处掉，别顺手中止正在生成的那一轮
+    // Esc 收起来：谁在上面谁先收（见 escTopLayer），别顺手中止正在生成的那一轮
     document.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !envOpen()) { return; }
+      if (e.key !== "Escape" || escTopLayer() !== "env") { return; }
       e.preventDefault();
       e.stopImmediatePropagation();
       closeEnv();
@@ -13875,6 +14239,13 @@
     settingsOverlay.classList.add("hidden");
   }
   settingsOverlay.addEventListener("click", (e) => { if (e.target === settingsOverlay) { closeSettings(); } });
+  // Esc 也能关掉设置（以前这一块没接这条键：在里面按一下会落到“中止正在生成的一轮”那条上）
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape" || escTopLayer() !== "settings") { return; }
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    closeSettings();
+  });
   const settingsCloseBtn = document.getElementById("settingsClose");
   if (settingsCloseBtn) { settingsCloseBtn.addEventListener("click", closeSettings); }
 
