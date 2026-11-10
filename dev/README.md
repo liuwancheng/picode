@@ -175,6 +175,11 @@ npm run web:shot -- --width 1000 --height 760 --fake-pi --script dev/dragSession
 # 点一下就该切过去，按下那一瞬间后端正推会话列表（跑完一轮、切换、子会话起落时都会推）也照样算数
 npm run web:shot -- --fake-pi --width 900 --height 500 --script dev/tabClick.js
 
+# 验文件侧边栏「改动」跟随目录过滤（真 Git 改动，不向模型发消息）：包含下级目录、
+# 路径边界与目录软链接、新建 / 删除、空目录、刷新与会话恢复、保留已打开 diff；底部改动层仍列全部。
+npm run web:shot -- --fake-pi --width 1400 --height 900 --script dev/changesDirectory.js
+npm run web:shot -- --fake-pi --theme dark --width 420 --height 900 --script dev/changesDirectory.js
+
 # 验「消息滑到底再往上拖，把改动清单拖出来」（底下那一块跟着手指长起来、有阻尼；松手过线留下、
 # 按内容占高最多 45%；两块各占一块不互相盖、贴底拖时最后一行没被顶出去；点一行看那份 diff；
 # 拖着它头上那一条往下拉 / 清单滚到最上头再往下拉 / 点叉都能收起来（清单没到顶时往下拉是翻清单）；

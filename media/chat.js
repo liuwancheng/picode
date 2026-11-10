@@ -8395,6 +8395,13 @@
   function renderDirListing(listing, tab) {
     const page = fileTabPage(tab);
     if (!page) { return; }
+    // 目录软链接、大小写与 ./ 等写法统一为后端确认的实际目录。
+    if (typeof listing?.path === "string" && listing.path !== tab.path) {
+      tab.path = listing.path;
+      tab.dir = listing.path;
+      if (fileSidebar.changeTab?.drawn) { drawChanges(fileSidebar.changeTab); }
+      syncFileView();
+    }
     page.innerHTML = "";
     if (fileSidebar.dirBody) { fileSidebar.dirBody.scrollTop = 0; }   // 换到这一层：清单从头看（不是停在上一层读到的地方）
     fillDirListing(page, listing, tab, tab.path);
@@ -8760,7 +8767,9 @@
         return;
       }
       if (tab.proj) {
-        renderDirListing(await resp.json(), tab);
+        const listing = await resp.json();
+        if (token !== fileSidebar.token || seq !== tab.seq) { return; }
+        renderDirListing(listing, tab);
         tab.drawn = true;
         return;
       }
@@ -8851,17 +8860,22 @@
     const pane = fileSidebar.changeBody;
     if (!page || !pane) { return; }
     const top = pane.scrollTop;
+    const dir = String(fileSidebar.fileTab?.path || FILE_SIDEBAR_PROJECT_PATH)
+      .replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+    const inRoot = !dir || dir === FILE_SIDEBAR_PROJECT_PATH;
+    // 只过滤显示：完整清单仍用于刷新与判断已打开的 diff 是否真的没有改动。
+    const visible = inRoot ? tab.changes : tab.changes.filter(item => item?.path?.startsWith(dir + "/"));
     page.innerHTML = "";
-    if (tab.changes.length === 0) {
+    if (visible.length === 0) {
       const note = document.createElement("div");
       note.className = "file-note";
-      note.textContent = FILE_SIDEBAR_CHANGES_HINT;
+      note.textContent = inRoot ? FILE_SIDEBAR_CHANGES_HINT : "当前目录没有改动。";
       page.appendChild(note);
       tab.drawn = true;
       tab.scrollTop = 0;
       pane.scrollTop = 0;
     } else {
-      tab.changes.forEach((item) => { if (item && item.path) { page.appendChild(changeRow(item)); } });
+      visible.forEach((item) => { if (item && item.path) { page.appendChild(changeRow(item)); } });
       tab.drawn = true;
       tab.scrollTop = top;
       pane.scrollTop = top;
@@ -9066,6 +9080,11 @@
     tab.path = path;
     tab.dir = path;
     tab.line = 0;
+    // 换目录时立刻按手上完整清单重画；异步刷新回来仍按当前目录过滤。
+    if (fileSidebar.changeTab?.drawn) {
+      if (fileSidebar.changeBody) { fileSidebar.changeBody.scrollTop = 0; }
+      drawChanges(fileSidebar.changeTab);
+    }
     tab.drawn = false;   // 换了一层：这一块里画的是上一层那份清单，作废（下面重新取）
     if (!listing) { showFileList(tab); return; }
     renderDirListing(listing, tab);

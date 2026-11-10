@@ -1248,7 +1248,8 @@ export class PiChatWebServer {
      * 列一个目录给页面（`/dir?session=…&path=…`）：点消息流里的目录链接、以及面板里再点进去的
      * 子目录都走它。目录边界与 `/file` 同一套（见 resolveSessionPath）。
      *
-     * 回一份 JSON：`{ entries: [{ name, path, dir, size?, image? }], truncated? }`。
+     * 回一份 JSON：`{ path, entries: [{ name, path, dir, size?, image? }], truncated? }`。
+     *   - 顶层 `path` 是实际打开的目录（相对会话目录，根目录为 `.`），用于统一软链接与目录过滤；
      *   - `path` 是相对会话目录的写法（页面拿它当标签的键，也原样贴回下一次请求），不写绝对路径；
      *   - 文件带着 `size`（字节），图片还带 `image: true`——清单里那一行据此决定挂不挂缩略图；
      *   - 顺序：子目录在前、文件在后，各自按名字排（大小写不敏感）；
@@ -1264,7 +1265,7 @@ export class PiChatWebServer {
         if (!found.ok) { this.sendText(req, res, found.status, found.text); return; }
         try {
             const listing = await this.listDirAsync(found.real, found.realCwd);
-            this.sendJson(req, res, 200, listing);
+            this.sendJson(req, res, 200, { ...listing, path: path.relative(found.realCwd, found.real).replace(/\\/g, "/") || "." });
         } catch {
             // 路径真在、但读不动（拿文件当目录列 / 没权限 / 中途没了）：都按「没这个目录」回
             this.sendText(req, res, 404, "没有这个目录。");
