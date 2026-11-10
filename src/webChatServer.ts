@@ -866,10 +866,10 @@ export class PiChatWebServer {
      * 匹配到的路径同样要过那道边界：清单里那个文件真身在会话目录外（读的是外面的软链接）时
      * 也不给看。
      *
-     * 第三档（同样只有文件有）在前两档都没中时走：在会话目录的文件清单里挑最像的那一个
-     * （见 fileSearch.ts 的 findListedFile）。它管的是「这个文件会话里没人碰过，但光名字本来就是
-     * 想点它」——正文里写 `chat.js` 而不写 `media/chat.js` 时（模型自己写的链接、人贴的路径）
-     * 不至于点不动。清单跟文件搜索共用一份、带缓存，所以点一下不用重新扫盘。
+     * 第三档（同样只有文件有）在前两档都没中时走：共用点链接的候选解析，只认唯一命中
+     * （见 fileSearch.ts 的 findListedFile）。先查带缓存的普通清单，没有同名文件才按 basename
+     * 定向查 ignore 忽略的产物；多个候选由界面选好相对路径再开，不在这里静默挑第一份。
+     * 因而模型只写 `reviews/a.json`、而 bash 产物落在被忽略的深层目录时，也能找到并打开。
      *
      * 看不了时返回状态码与一句人话，调用方直接照它回；kind 只把话里的「文件 / 目录」说对。
      */
@@ -900,14 +900,14 @@ export class PiChatWebServer {
                 return this.checkInsideSession(realHit, realCwd, kind);
             }
         }
-        // 第三档：会话里没人碰过这个名字——在会话目录的文件清单里挑最像的那一个
+        // 第三档：共用普通候选 / 定向兜底，只打开唯一命中（找到的真身仍过同一道边界）
         if (kind === "文件") {
             const hit = await findListedFile(cwd, wantPath);
             const realHit = hit ? realPathOr(path.resolve(cwd, hit)) : undefined;
             if (realHit) {
                 return this.checkInsideSession(realHit, realCwd, kind);
             }
-            return { ok: false, status: 404, text: "没有这个文件（会话目录里按文件名也只找了有限的一圈）。" };
+            return { ok: false, status: 404, text: "没有这个文件，或路径未能唯一匹配（同名时请选完整路径）。" };
         }
         return { ok: false, status: 404, text: `没有这个${kind}。` };
     }

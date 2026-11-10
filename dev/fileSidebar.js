@@ -263,7 +263,7 @@ const MD_PLAIN_LINES = [
  * 按名字找一圈（不进 node_modules 这类目录，有定额）。
  * 素材：子目录里藏一个（光名字链接靠第二档找到它）、会话目录里与子目录里各放一个同名的
  *（先按会话目录拼那一档该赢）、会话目录外面那个 package.json（清单里匹配到了，边界也得挡住）、
- * 深浅两层同名的一个（会话里没人碰过，靠第三档找到浅的那一份）、以及藏在 node_modules 里那个
+ * 深浅两层同名的一个（会话里没人碰过，列候选后选浅的那一份）、以及藏在 node_modules 里那个
  *（第三档不进去，按找不到算）。
  * 这份清单来自 pi 的工具调用，所以下面先让假 pi 读这几个文件（见 fakePi.js 的「碰文件」那一段）。
  * 文件名字写成 ASCII：消息流里那条链接规则只认 `[\w@-]`，中文名字根本不会变链接。
@@ -293,7 +293,7 @@ const NAME_LINES = [
     "// only-name 第 5 行",
     "// only-name 第 6 行",
 ];
-/** 第三档找到的那一份：深浅两层同名各一份，浅的那一层该赢。 */
+/** 第三档的同名候选：深浅各一份，须选完整路径，不自动挑浅的那份。 */
 const NAME_BY_NAME_LINES = ["// deep 里这一份 1", "// deep 里这一份 2"];
 const NAME_BY_NAME_DEEP_LINES = ["// nested 里这一份 1", "// nested 里这一份 2"];
 const NAME_SKIPPED_LINES = ["// 藏在 node_modules 里 1", "// 藏在 node_modules 里 2"];
@@ -376,6 +376,10 @@ function writeLive(cwd, marker, extra) {
 function prepareDirs(cwd) {
     fs.mkdirSync(path.join(cwd, DIR.sub), { recursive: true });
     fs.mkdirSync(path.join(cwd, DIR.empty), { recursive: true });
+    // 上一趟切到 dirA 时假 pi 会留下会话文件；清掉调试产物，目录素材仍应是固定那七项。
+    for (const name of fs.readdirSync(path.join(cwd, DIR.top))) {
+        if (/^fake-session-\d+\.jsonl$/.test(name)) { fs.rmSync(path.join(cwd, DIR.top, name), { force: true }); }
+    }
     const one = [];
     for (let i = 1; i <= DIR_ONE_LINES; i++) { one.push("// one 第 " + i + " 行"); }
     fs.writeFileSync(path.join(cwd, DIR.topFile), one.join("\n") + "\n", "utf8");
@@ -411,7 +415,7 @@ function prepareNameFixtures(cwd) {
     fs.writeFileSync(path.join(cwd, NAME.bareFile), NAME_LINES.join("\n") + "\n", "utf8");
     fs.writeFileSync(path.join(cwd, NAME.both), NAME_BOTH_LINES.join("\n") + "\n", "utf8");
     fs.writeFileSync(path.join(cwd, NAME.bothDeep), NAME_BOTH_DEEP_LINES.join("\n") + "\n", "utf8");
-    // 第三档那两份：深浅两层同名（浅的那一层该赢），以及藏在 node_modules 里的（那一档不进去）
+    // 第三档两份同名候选，以及藏在 node_modules 里的（兜底不进去）
     fs.mkdirSync(path.join(cwd, "deep", "nested"), { recursive: true });
     fs.writeFileSync(path.join(cwd, NAME.byNameShallow), NAME_BY_NAME_LINES.join("\n") + "\n", "utf8");
     fs.writeFileSync(path.join(cwd, NAME.byNameDeep), NAME_BY_NAME_DEEP_LINES.join("\n") + "\n", "utf8");
@@ -2287,6 +2291,7 @@ module.exports = async (page) => {
             out.outside = await get(${JSON.stringify(NAME.outside)});
             out.absent = await get(${JSON.stringify(NAME.absent)});
             out.byName = await get(${JSON.stringify(NAME.byName)});
+            out.byNameShallow = await get(${JSON.stringify(NAME.byNameShallow)});
             out.skipped = await get(${JSON.stringify(NAME.skipped)});
             return JSON.stringify(out);
         })();
@@ -2312,9 +2317,10 @@ module.exports = async (page) => {
     check("匹配到的文件真身在外面：403、不把内容给出去",
         rawName.outside.status === 403 && rawName.outside.text.indexOf("会话目录外") >= 0,
         JSON.stringify({ status: rawName.outside.status, text: rawName.outside.text }));
-    check("会话里没人碰过的名字：地址也直接给内容（浅的那一层）",
-        rawName.byName.status === 200 && rawName.byName.text === NAME_BY_NAME_LINES.join("\n"),
-        JSON.stringify({ status: rawName.byName.status, text: rawName.byName.text }));
+    check("同名多份：只读地址不静默挑第一份；选完整路径后可读",
+        rawName.byName.status === 404 && rawName.byName.text.includes("唯一匹配")
+        && rawName.byNameShallow.status === 200 && rawName.byNameShallow.text === NAME_BY_NAME_LINES.join("\n"),
+        JSON.stringify({ ambiguous: rawName.byName.status, selected: rawName.byNameShallow.status }));
     check("只在 node_modules 里有的名字：地址也按找不到算（不进去那些目录）",
         rawName.skipped.status === 404 && rawName.skipped.text.indexOf("没有这个文件") >= 0,
         JSON.stringify({ status: rawName.skipped.status, text: rawName.skipped.text }));

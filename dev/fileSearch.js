@@ -20,11 +20,11 @@
  *   6. 最后一趟按「插件里的对话面板」跑（在页面脚本里先塞一个网页视图接口）：
  *      浮层还在、也还能按快捷键打开，点一条结果是给插件发 openFile（那边没有左边那一列）。
  *
- * 测试文件现写进会话目录（dev/.scratch/find/），那个目录不进版本库，随便造。
+ * 测试文件写进独立会话目录 dev/.scratch/file-search-regression/find/，不进版本库。
  */
 const fs = require("fs");
 const path = require("path");
-const { SCRATCH_DIR } = require("./harness.js");
+const { SCRATCH_DIR, openSessionIn } = require("./harness.js");
 
 /** 测试素材（相对会话目录的写法）。 */
 const FIX = {
@@ -86,6 +86,11 @@ function prepareFiles(cwd) {
 }
 
 module.exports = async (page) => {
+    // 固定独立会话目录，避免 dev/.scratch 中其他回归素材产生额外同名文件。
+    const isolated = path.join(SCRATCH_DIR, "file-search-regression");
+    fs.mkdirSync(isolated, { recursive: true });
+    await openSessionIn(page, isolated);
+    await page.waitReady();
     const checks = [];
     const check = (name, pass, detail) => {
         checks.push([name, !!pass]);
@@ -209,7 +214,9 @@ module.exports = async (page) => {
     await pressSearchKey();
     await page.sleep(400);
     await typeSearch("gamma");
-    const named = await waitSearch("按名字搜到 gamma", (s) => s.rows.some((r) => r.text.indexOf("find/deep/gamma.txt") >= 0));
+    const named = await waitSearch("按名字搜到 gamma", (s) => s.rows.length > 0
+        && s.rows.every((r) => r.text.toLowerCase().includes("gamma"))
+        && s.rows.some((r) => r.text.indexOf("find/deep/gamma.txt") >= 0 && r.marks.join("").toLowerCase() === "gamma"));
     const gammaRow = named.rows.find((r) => r.text.indexOf("find/deep/gamma.txt") >= 0);
     check("按文件名搜到子目录里的那个文件", !!gammaRow, JSON.stringify(named.rows.slice(0, 4)));
     check("命中的那几个字母标出来了", !!gammaRow && gammaRow.marks.join("").toLowerCase() === "gamma",
@@ -448,6 +455,13 @@ module.exports = async (page) => {
     await page.eval("location.reload(); return true;");
     await page.sleep(1600);
     check("插件里的对话面板里没有左边那一列", (await page.eval(`return !document.getElementById("fileSidebar")`)) === true);
+    // 模拟真实宿主先发送会话；文件操作不允许借无会话状态猜目录。
+    await page.eval(`
+        window.postMessage({type:'sessionList',sessions:[{id:${JSON.stringify(info.sessionId)},name:'测试会话',cwd:${JSON.stringify(cwd)},piReady:true}]},'*');
+        window.postMessage({type:'sessionActivated',sessionId:${JSON.stringify(info.sessionId)}},'*');
+        return true;
+    `);
+    await page.sleep(150);
     await pressSearchKey();
     await page.sleep(400);
     const panelOpen = await searchState();

@@ -17,6 +17,7 @@
  */
 import * as crypto from "crypto";
 import * as path from "path";
+import * as fs from "fs";
 import type { AskRequest } from "./askProtocol";
 import { writeAskAnswer } from "./askProtocol";
 import type { MessageSink } from "./sessionRuntime";
@@ -44,14 +45,14 @@ import { displayName, machineName } from "./pageHtml";
 import { MessageBuffer, PAGE_TRANSIENT_MESSAGE_TYPES } from "./webTransport";
 import { pickOverlayClient } from "./overlayTarget";
 import { ScreenRegistry } from "./screenRegistry";
-import { dirInsideAny, dirKey } from "./pathRules";
+import { dirInsideAny, dirKey, insideFolder } from "./pathRules";
 import type { WebServerHost } from "./webChatServer";
 import type { SessionChanges } from "./gitChanges";
 import type { BashTaskInfo } from "./bashProtocol";
 import { uniqueNameParts, composeName, type NameParts } from "./names";
 import { captureDesktopScreenshot } from "./desktopScreenshot";
 import { DesktopLive } from "./desktopLive";
-import { DesktopNotice } from "./desktopNotice";
+import { DesktopNotice, openLocalFolder } from "./desktopNotice";
 import { describeRestart } from "./serverRestart";
 import type { SessionRuntime } from "./sessionRuntime";
 import { clipText } from "./messageUtils";
@@ -1349,7 +1350,7 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
      * 只记一行日志：不然"点了没反应"没人查得出来。
      */
     protected routeToScreen(kind: string, payload: Record<string, unknown>, what: string): boolean {
-        const cwd = this.activeCwd();
+        const cwd = typeof payload.cwd === "string" ? payload.cwd : this.activeCwd();
         const screen = this.screens.pick(cwd);
         if (!screen) {
             this.onNotice(`这台机器上没有打开 ${cwd} 的 VS Code 窗口，这件事（${what}）没人做。`);
@@ -1390,12 +1391,13 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         this.routeToScreen("openFileAt", { path: p, line }, `打开 ${p}`);
     }
 
-    protected openFileFromWebview(p: string, line?: number, col?: number): void {
+    protected openFileFromWebview(p: string, line?: number, col?: number, fromSession?: string): void {
+        const sessionId = fromSession ?? this.getActive()?.id ?? "";
+        const cwd = sessionId ? this.resolveSessionDir(sessionId) : undefined;
+        if (!cwd) { this.onNotice("找不到文件链接的来源会话目录"); return; }
         this.routeToScreen("openFile", {
-            path: p,
-            line,
-            col,
-            knownFiles: this.getActive()?.getKnownFiles() ?? [],
+            path: p, line, col, cwd,
+            knownFiles: this.knownSessionFiles(sessionId),
         }, `打开 ${p}`);
     }
 
@@ -1521,6 +1523,9 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
                 // 文件搜索浮层（Ctrl+Shift+F）：按文件名 / 按文件内容找，结果只回给那块屏。
                 this.startFileSearch(msg);
                 return true;
+            case "revealFileFolder":
+                void this.revealFileFolder(msg);
+                return true;
             case "pathCandidates":
                 // 点文件链接之前先问一句：这个名字对上了几个文件（同名的不止一个就让界面弹选择）
                 this.startPathCandidates(msg);
@@ -1544,10 +1549,8 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         const reply = (extra: Record<string, unknown>) => {
             this.postToOneClient(clientId, { type: "findResults", seq, mode, query, ...extra });
         };
-        const cwd = (() => {
-            const active = this.getActive(clientId);
-            return active ? (this.resolveSessionDir(active.id) ?? active.cwd) : undefined;
-        })();
+        const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : this.getActive(clientId)?.id || "";
+        const cwd = sessionId ? this.resolveSessionDir(sessionId) : undefined;
         // 上一次还在跑的先掐掉（哪怕这一次因为没目录而直接回话）
         this.fileSearches.get(clientId)?.abort();
         if (!cwd) {
@@ -1581,17 +1584,46 @@ export class ChatHost extends ChatControllerBase implements WebServerHost {
         const clientId = this.currentPageId;
         const requestId = typeof msg.requestId === "number" && Number.isFinite(msg.requestId) ? msg.requestId : 0;
         const want = typeof msg.path === "string" ? msg.path.slice(0, 500) : "";
-        const active = this.getActive(clientId);
-        const cwd = active ? (this.resolveSessionDir(active.id) ?? active.cwd) : undefined;
+        // 点链接时的来源会话须贯穿候选与打开；不能在异步回话时借当前会话目录。
+        const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : this.getActive(clientId)?.id || "";
+        const cwd = sessionId ? this.resolveSessionDir(sessionId) : undefined;
         const reply = (candidates: string[]) => {
-            this.postToOneClient(clientId, { type: "pathCandidatesResult", requestId, path: want, candidates });
+            this.postToOneClient(clientId, { type: "pathCandidatesResult", requestId, sessionId, path: want, candidates });
         };
         if (!cwd || !want) {
             reply([]);
             return;
         }
-        const known = active ? this.knownSessionFiles(active.id) : [];
+        const known = this.knownSessionFiles(sessionId);
         findPathCandidates(cwd, want, known).then(reply, () => { reply([]); });
+    }
+
+    /** 文件链接后的文件夹按钮：打开后端机器上的所在目录，不打开文件。 */
+    private async revealFileFolder(msg: any): Promise<void> {
+        const clientId = this.currentPageId;
+        const sessionId = typeof msg.sessionId === "string" ? msg.sessionId : "";
+        const requestId = typeof msg.requestId === "number" ? msg.requestId : 0;
+        const reply = (data: Record<string, unknown>) => this.postToOneClient(clientId, {
+            type: "fileFolderResult", sessionId, requestId, ...data,
+        });
+        try {
+            const want = typeof msg.path === "string" ? msg.path : "";
+            const cwd = sessionId ? this.resolveSessionDir(sessionId) : undefined;
+            if (!cwd || !want || want.length > 500 || want.includes("\0")) { throw new Error("请指定仍可访问的会话和有效文件路径"); }
+            const candidates = await findPathCandidates(cwd, want, this.knownSessionFiles(sessionId));
+            if (candidates.length > 1) { throw new Error("找到多个同名文件，请先选择实际路径"); }
+            if (!candidates.length) { throw new Error("找不到这个文件，无法打开所在目录"); }
+            const [root, real] = await Promise.all([
+                fs.promises.realpath(cwd), fs.promises.realpath(path.resolve(cwd, candidates[0])),
+            ]);
+            if (!insideFolder(real, root)) { throw new Error("这个文件在会话目录外，不能打开所在目录"); }
+            if (!(await fs.promises.stat(real)).isFile()) { throw new Error("这条链接不是一个文件"); }
+            const folder = path.dirname(real);
+            await openLocalFolder(folder);
+            reply({ ok: true, folder });
+        } catch (error) {
+            reply({ ok: false, error: error instanceof Error ? error.message : "无法打开文件所在目录" });
+        }
     }
 
     /**

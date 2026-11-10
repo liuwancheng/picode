@@ -1,8 +1,8 @@
 /**
  * 找文件：按文件名找、按文件里的文字找，以及「按一个写岔了的路径找那个文件」。
  *
- * 三样东西共用一份**会话目录的文件清单**（带缓存）：搜索框搜名字、搜内容，
- * 消息流里点一个只有光名字（或者路径写岔了）的链接，都从这份清单里挑。
+ * 搜索框搜名字、搜内容，以及文件链接的普通候选共用一份**会话目录的文件清单**（带缓存）。
+ * 点文件链接时普通候选没有命中，再只按那个文件名定向找被 ignore 忽略的产物，不加载完整忽略清单。
  *
  * 清单怎么来：优先用 ripgrep（pi 自己就把一份放在 `<agent 目录>/bin/` 里，
  * 它自带的 grep / find 工具用的就是这一个），跑一遍 `rg --files`；
@@ -15,6 +15,7 @@ import { spawn, type ChildProcess } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { pathCaseKey } from "./pathRules";
 
 /** 内容搜索里一条命中：哪个文件、第几行、那一行长什么样。 */
 export interface TextHit {
@@ -56,6 +57,9 @@ const LIST_STALE_MS = 120_000;
 const LIST_CACHE_DIRS = 4;
 /** 列清单最多等这么久（大工程在慢盘上也就一两秒）。 */
 const LIST_TIMEOUT_MS = 10_000;
+/** 文件链接的定向兜底最多收这些同名候选、等这么久（不缓存，刚生成的产物下次点就能找到）。 */
+const MAX_LINK_CANDIDATES = 200;
+const LINK_TIMEOUT_MS = 4_000;
 /** 内容搜索最多等这么久：到点把 rg 杀掉，拿已经找到的那些。 */
 const TEXT_TIMEOUT_MS = 5_000;
 /** 内容搜索自己读文件时的定额。 */
@@ -264,40 +268,41 @@ async function loadList(cwd: string): Promise<FileList> {
     return walkFiles(cwd);
 }
 
-/** 没有 rg 时：自己在 Node 里把会话目录走一遍（跳过版本库和依赖目录，有定额）。 */
-async function walkFiles(cwd: string): Promise<FileList> {
+/** 没有 rg 时：自己走目录；定向兜底只收精确同名的文件，两条路都有数量 / 时间定额。 */
+async function walkFiles(cwd: string, base?: string): Promise<FileList> {
     const files: string[] = [];
     const pending = [cwd];
     const startedAt = Date.now();
+    const limit = base === undefined ? MAX_LISTED_FILES : MAX_LINK_CANDIDATES;
+    const budget = base === undefined ? WALK_BUDGET_MS : LINK_TIMEOUT_MS;
     let seen = 0;
     let truncated = false;
     while (pending.length > 0) {
+        if (Date.now() - startedAt > budget) { truncated = true; break; }
         const dir = pending.shift()!;
-        let entries: fs.Dirent[];
+        // 逐项读，忽略目录即使很大也不先整份加载进内存；不跟随目录软链接。
         try {
-            entries = await fs.promises.readdir(dir, { withFileTypes: true });
-        } catch {
-            continue;
-        }
-        for (const entry of entries) {
-            seen += 1;
-            if (seen > MAX_LISTED_FILES * 4 || Date.now() - startedAt > WALK_BUDGET_MS) {
-                truncated = true;
-                break;
-            }
-            if (entry.isDirectory()) {
-                if (entry.name !== ".git" && entry.name !== "node_modules") {
-                    pending.push(path.join(dir, entry.name));
+            const entries = await fs.promises.opendir(dir);
+            for await (const entry of entries) {
+                seen += 1;
+                if (seen > MAX_LISTED_FILES * 4 || Date.now() - startedAt > budget) {
+                    truncated = true;
+                    break;
                 }
-                continue;
+                if (entry.isDirectory()) {
+                    const name = pathCaseKey(entry.name);
+                    if (name !== ".git" && name !== "node_modules") {
+                        pending.push(path.join(dir, entry.name));
+                    }
+                    continue;
+                }
+                if (!entry.isFile() || (base !== undefined && pathCaseKey(entry.name) !== pathCaseKey(base))) {
+                    continue;
+                }
+                files.push(relativeTo(cwd, path.join(dir, entry.name)));
+                if (files.length >= limit) { truncated = true; break; }
             }
-            if (!entry.isFile()) { continue; }
-            files.push(relativeTo(cwd, path.join(dir, entry.name)));
-            if (files.length >= MAX_LISTED_FILES) {
-                truncated = true;
-                break;
-            }
-        }
+        } catch { /* 读不到这个目录，接着找其他目录 */ }
         if (truncated) { break; }
     }
     files.sort();
@@ -467,7 +472,7 @@ async function searchContentsSlowly(cwd: string, q: string, limit: number,
  * 点链接前先问一句：这个写法在会话目录里对上了几个文件（相对写法，按「最该赢的」排在前面）。
  *
  * 完全照写的路径就在 → 只回它一个（写得清楚就不问）；拼不到时才把同名的都列出来
- * （文件清单里的，加上这个会话碰过、并且真身在会话目录里的）。
+ * （先认会话碰过的，再找普通清单；普通清单没有同名文件时才定向查 ignore 忽略的目录）。
  * 一个都没有也照原样返回（界面就拿原来那个写法去开，该 404 / 403 就让它报）。
  *
  * 会话碰过的文件先认：名字对得上就直接回它（跟编辑器那一侧同一个规矩），不为了这一下把整个
@@ -490,19 +495,50 @@ export async function findPathCandidates(cwd: string, wantPath: string,
         knownHits.sort((a, b) => compareCandidates(want, a, b));
         return knownHits;
     }
-    const list = await listSessionFiles(cwd, LIST_STALE_MS);
+    let list = await listSessionFiles(cwd, LIST_STALE_MS);
+    const matchesBase = (rel: string) => pathCaseKey(rel.split("/").pop() || "") === pathCaseKey(base);
+    if (!list.files.some(matchesBase)) {
+        list = await findBasenameFiles(cwd, base);
+    }
     const found: string[] = [];
     const seen = new Set<string>();
     for (const rel of list.files) {
-        if ((rel.split("/").pop() || "") !== base) { continue; }
+        if (!matchesBase(rel)) { continue; }
         // Windows 上同一个文件可能大小写不同（清单里一种、工具调用里一种），别列两遍
-        const key = process.platform === "win32" ? rel.toLowerCase() : rel;
+        const key = pathCaseKey(rel);
         if (seen.has(key)) { continue; }
         seen.add(key);
         found.push(rel);
     }
     found.sort((a, b) => compareCandidates(want, a, b));
-    return found;
+    // 超时只找到一份不代表唯一：不让界面静默打开这个可能错误的文件。
+    return list.truncated && found.length === 1 ? [] : found;
+}
+
+/** 普通候选没有命中才用：按 basename 精确限定 rg 输出，覆盖 .gitignore / .ignore，不留未命中缓存。 */
+async function findBasenameFiles(cwd: string, base: string): Promise<FileList> {
+    const rg = resolveRg();
+    if (rg) {
+        // glob 字符按字面转义；加 **/ 也避免以 ! 开头的文件名被当成排除规则。
+        const literal = base.replace(/[\\*?\[\]{}]/g, "\\$&");
+        const run = await runRg(rg, [
+            "--files", "--hidden", "--no-ignore",
+            ...(process.platform === "win32" ? ["--glob-case-insensitive"] : []),
+            "--glob", "**/" + literal,
+            "--glob", "!**/.git/**",
+            "--glob", "!**/node_modules/**",
+            "--no-messages",
+        ], cwd, { maxLines: MAX_LINK_CANDIDATES, timeoutMs: LINK_TIMEOUT_MS });
+        if (run.missing) {
+            forgetRg();
+        } else if (!run.failed) {
+            const files = run.lines.map((line) => line.replace(/\\/g, "/"))
+                .filter((rel) => pathCaseKey(rel.split("/").pop() || "") === pathCaseKey(base));
+            files.sort();
+            return { files, truncated: run.stopped, slow: false };
+        }
+    }
+    return walkFiles(cwd, base);
 }
 
 /** 会话碰过、名字（最后那一段）对得上、而且真身在会话目录里的那几份（相对写法，去重后）。 */
@@ -513,14 +549,14 @@ function knownPathMatches(cwdResolved: string, knownFiles: readonly string[], ba
         const rel = relativeTo(cwdResolved, path.resolve(known));
         // 会话目录外面那个不开（那条路本来就会报 403，不往选择里放）
         if (!rel || rel === ".." || rel.startsWith("../") || path.isAbsolute(rel)) { continue; }
-        if ((rel.split("/").pop() || "") !== base) { continue; }
+        if (pathCaseKey(rel.split("/").pop() || "") !== pathCaseKey(base)) { continue; }
         // 碰过、但现在已经不在了（删了 / 挪走了）：不拿它当候选，照旧去文件清单里找
         try {
             if (!fs.statSync(path.resolve(cwdResolved, rel)).isFile()) { continue; }
         } catch {
             continue;
         }
-        const key = process.platform === "win32" ? rel.toLowerCase() : rel;
+        const key = pathCaseKey(rel);
         if (seen.has(key)) { continue; }
         seen.add(key);
         out.push(rel);
@@ -530,11 +566,12 @@ function knownPathMatches(cwdResolved: string, knownFiles: readonly string[], ba
 
 /**
  * 一串同名文件里谁排在前面：尾巴对上的赢，然后浅的、短的、按名字排在前面的。
- * 点链接自动挑那一个、以及弹出选择时列表的先后，都用这一个规矩。
+ * 弹出选择时列表的先后用这一个规矩；多个候选仍要由人选，不静默挑第一份。
  */
 function compareCandidates(want: string, a: string, b: string): number {
-    const tailA = a === want || a.endsWith("/" + want) ? 0 : 1;
-    const tailB = b === want || b.endsWith("/" + want) ? 0 : 1;
+    const key = pathCaseKey(want);
+    const tailA = pathCaseKey(a) === key || pathCaseKey(a).endsWith("/" + key) ? 0 : 1;
+    const tailB = pathCaseKey(b) === key || pathCaseKey(b).endsWith("/" + key) ? 0 : 1;
     if (tailA !== tailB) { return tailA - tailB; }
     const depthA = a.split("/").length;
     const depthB = b.split("/").length;
@@ -545,16 +582,10 @@ function compareCandidates(want: string, a: string, b: string): number {
 
 /**
  * 消息流里的文件链接只有光名字（`chat.js`）、或者路径写岔了（`src/chat.js` 写成 `lib/chat.js`）时，
- * 在会话目录的清单里挑最像的那一个（规矩见 compareCandidates）。
- * 清单读不到时给 undefined（调用方当「没找到」处理）。
+ * 共用点链接的候选解析（包含 ignore 产物的定向兜底），只在唯一命中时返回。
+ * 多个候选要由界面先选好相对路径再打开；找不到 / 截断后无法确定唯一时给 undefined。
  */
 export async function findListedFile(cwd: string, wantPath: string): Promise<string | undefined> {
-    const list = await listSessionFiles(cwd);
-    const want = String(wantPath ?? "").replace(/\\/g, "/").replace(/^\.\//, "");
-    const base = want.split("/").pop() || "";
-    if (!base) { return undefined; }
-    const candidates = list.files.filter((rel) => (rel.split("/").pop() || "") === base);
-    if (candidates.length === 0) { return undefined; }
-    candidates.sort((a, b) => compareCandidates(want, a, b));
-    return candidates[0];
+    const candidates = await findPathCandidates(cwd, wantPath);
+    return candidates.length === 1 ? candidates[0] : undefined;
 }

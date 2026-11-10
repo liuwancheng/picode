@@ -316,6 +316,11 @@ node dev/diffCheck.js
 # （同名的还有别处也只回它，这一下不扫整个仓库）；没碰过的才列文件清单；目录外那份不认：
 node dev/linkCandidates.js
 
+# 验被忽略的 bash 产物短链接、文件链接后的所在目录图标、同名选择与会话绑定：
+# 全用假数据，不调用模型；系统打开目录用记录器替换，不实际弹文件管理器。
+node dev/fileLinks.js
+node dev/fileLinks.js --dark --narrow
+
 # 验会话行「… → 重命名」（历史会话不切换、不启动进程；活动会话顶条同步；
 # 取消 / 空白名 / 输入法 / 回车保存 / 保存失败 / 分页 / 刷新保留 / 窄窗菜单与弹窗，假数据、不调模型）：
 npm run web:shot -- --fake-pi --width 1200 --height 760 --script dev/sessionRename.js

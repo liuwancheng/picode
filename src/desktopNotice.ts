@@ -47,6 +47,16 @@ export function openInBrowser(url: string): void {
     } catch { /* 打不开算了 */ }
 }
 
+/** 只打开所在目录，不打开文件；folder 须由宿主先解析真实路径并校验会话边界。 */
+export function openLocalFolder(folder: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+        const child = spawn(command, [folder], { detached: true, stdio: "ignore" });
+        child.once("error", reject);
+        child.once("spawn", () => { child.unref(); resolve(); });
+    });
+}
+
 /**
  * 吃 `--app=<地址>` 的那些浏览器：照 exe 的名字认。套壳的一般也叫 chrome.exe（比如 Helium），
  * 所以认名字就够了，不用一支支去试。

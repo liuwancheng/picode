@@ -286,7 +286,9 @@
     const dl = line ? ` data-line="${line}"` : "";
     const dc = col ? ` data-col="${col}"` : "";
     const dd = dir ? ' data-dir="1"' : "";
-    return `<a class="file-link" href="#" data-file="${da}"${dd}${dl}${dc}>${inner != null ? inner : escHtml(path) + tail}</a>`;
+    const link = `<a class="file-link" href="#" data-file="${da}"${dd}${dl}${dc}>${inner != null ? inner : escHtml(path) + tail}</a>`;
+    if (dir) { return link; }
+    return `<span class="file-link-wrap">${link}<button type="button" class="file-folder" data-file="${da}" title="打开所在目录（后端所在电脑）" aria-label="打开文件所在目录">${ICONS.folder}</button></span>`;
   }
   let fileLinkReady = false;
   function ensureFileLink() {
@@ -7088,7 +7090,7 @@
    * 点链接问后端「这个名字对上了几个文件」最多等多久：后端自己那两道时限是 10 秒（有 rg）
    * 与 4 秒（没 rg、自己走目录），这边留出余量。等不到才按写的那样硬开。
    */
-  const FILE_CANDIDATES_WAIT_MS = 12000;
+  const FILE_CANDIDATES_WAIT_MS = 25000;
   /**
    * 上色那条线：正文不超过这么多字符才上色，超过就黑白、只带行号（见 highlightFileLines）。
    * 整段高亮是一次同步调用，几十万字符就要几百毫秒，而这里一列正文可以到 2 MB——
@@ -9090,50 +9092,95 @@
    * 弹出来、预填这个名字，让点的人自己挑（挑中的还停在链接说的那一行）。
    * @param dir 这是个目录（只有正文里以斜杠结尾的写法会带；工具卡片那颗按钮没有这种）
    */
-  function openFileForUser(path, line, col, dir) {
-    if (!path) { return; }
-    if (dir) { openFileDirect(path, line, col, dir); return; }
+  function openFileForUser(path, line, col, dir, opts) {
+    const sessionId = opts && opts.sessionId || activeId;
+    if (!path || !sessionId || sessionId !== activeId) { return; }
+    if (dir) { openFileDirect(path, line, col, dir, sessionId); return; }
+    const action = opts && opts.action === "folder" ? "folder" : "view";
+    const button = opts && opts.button;
+    if (button && button.disabled) { return; }
+    if (button) { button.disabled = true; }
     const requestId = ++fileCandidatesSeq;
     // 后端没回话（版本对不上、断线）：照老样子直接开，别让点一下没反应。
-    // 等得比后端自己那两道时限都长（无 ripgrep 时走目录 4 秒、有 rg 时 10 秒）：
-    // 大仓库里先放弃的话，会赶在真话之前按写的那样硬开，结果是「看不了」。
+    // 普通清单与忽略产物的定向兜底都有时限，等待要覆盖两档：
+    // 别在真话回来前就按短路径硬开；切会话时会主动取消等待。
     const timer = setTimeout(() => {
       if (!pendingFileCandidates.has(requestId)) { return; }
-      pendingFileCandidates.delete(requestId);
-      openFileDirect(path, line, col);
+      openResolvedFile(requestId, path);
     }, FILE_CANDIDATES_WAIT_MS);
-    pendingFileCandidates.set(requestId, { path: path, line: line, col: col, timer: timer });
-    vscode.postMessage({ type: "pathCandidates", path: path, requestId: requestId });
+    pendingFileCandidates.set(requestId, { path, line, col, timer, sessionId, action, button, stage: "candidates" });
+    vscode.postMessage({ type: "pathCandidates", path, sessionId, requestId });
   }
 
   /** 后端回了「这个名字对上了哪几个文件」：一个就开，好几个就弹搜索浮层。 */
   function onPathCandidates(msg) {
     const pend = pendingFileCandidates.get(msg.requestId);
-    if (!pend) { return; }
-    pendingFileCandidates.delete(msg.requestId);
-    clearTimeout(pend.timer);
+    if (!pend || pend.stage !== "candidates") { return; }
+    if (pend.sessionId !== activeId || (msg.sessionId && msg.sessionId !== pend.sessionId)) {
+      finishFileLinkRequest(msg.requestId);
+      return;
+    }
     const list = Array.isArray(msg.candidates)
       ? msg.candidates.filter((x) => typeof x === "string" && x !== "") : [];
     if (list.length > 1) {
       const name = String(pend.path).replace(/\\/g, "/").split("/").pop() || String(pend.path);
+      finishFileLinkRequest(msg.requestId);
       openFileSearch({
-        query: name,
-        line: pend.line || 0,
-        hint: "「" + pend.path + "」对上了 " + list.length + " 个同名文件，点一个打开。",
+        query: name, line: pend.line || 0, sessionId: pend.sessionId,
+        action: pend.action, candidates: list,
+        hint: "「" + pend.path + "」对上了 " + list.length + " 个同名文件，请选择实际路径。",
       });
       return;
     }
-    openFileDirect(list.length === 1 ? list[0] : pend.path, pend.line, pend.col);
+    openResolvedFile(msg.requestId, list.length === 1 ? list[0] : pend.path);
+  }
+
+  function finishFileLinkRequest(requestId) {
+    const pend = pendingFileCandidates.get(requestId);
+    if (!pend) { return; }
+    clearTimeout(pend.timer);
+    if (pend.button) { pend.button.disabled = false; }
+    pendingFileCandidates.delete(requestId);
+  }
+
+  /** 已选定路径：查看与打开所在目录共用候选解析，整个过程绑定点链接时的会话。 */
+  function openResolvedFile(requestId, path) {
+    const pend = pendingFileCandidates.get(requestId);
+    if (!pend) { return; }
+    if (pend.sessionId !== activeId) { finishFileLinkRequest(requestId); return; }
+    clearTimeout(pend.timer);
+    if (pend.action === "view") {
+      finishFileLinkRequest(requestId);
+      openFileDirect(path, pend.line, pend.col, false, pend.sessionId);
+      return;
+    }
+    pend.stage = "folder";
+    pend.timer = setTimeout(() => {
+      onFileFolderResult({ requestId, ok: false, error: "尚未确认打开目录，请检查后端是否已重启。" });
+    }, 8000);
+    vscode.postMessage({ type: "revealFileFolder", sessionId: pend.sessionId, path, requestId });
+  }
+
+  function onFileFolderResult(msg) {
+    const pend = pendingFileCandidates.get(msg.requestId);
+    if (!pend || pend.stage !== "folder" || (msg.sessionId && msg.sessionId !== pend.sessionId)) { return; }
+    finishFileLinkRequest(msg.requestId);
+    if (msg.ok === true) {
+      if (pend.button && typeof msg.folder === "string") { pend.button.title = "打开所在目录：" + msg.folder; }
+    } else {
+      const st = sessions.get(pend.sessionId);
+      if (st) { addPlain(st, "system error", null, msg.error || "无法打开文件所在目录"); }
+    }
   }
 
   /** 真去开一个文件（不再问同名的事了）。 */
-  function openFileDirect(path, line, col, dir) {
-    if (!path) { return; }
+  function openFileDirect(path, line, col, dir, sessionId = activeId) {
+    if (!path || !sessionId || sessionId !== activeId) { return; }
     if (fileSidebar.root) { openSidebarLink(path, line, dir); return; }
-    vscode.postMessage({ type: "openFile", path, line, col });
+    vscode.postMessage({ type: "openFile", path, line, col, sessionId });
   }
 
-  let fileCandidatesSeq = 0;
+  let fileCandidatesSeq = Date.now();
   /** 正在等后端回话的那几次点链接（键是 requestId）。 */
   const pendingFileCandidates = new Map();
 
@@ -9146,6 +9193,10 @@
    * 所以切走时把它们撤掉（连着网页那个 iframe、图片那个显示地址）。
    */
   function resetFileSidebarForSession() {
+    for (const [id, pend] of pendingFileCandidates) {
+      if (pend.sessionId !== activeId) { finishFileLinkRequest(id); }
+    }
+    if (fileSearch.open && fileSearch.sessionId !== activeId) { closeFileSearch(); }
     if (!fileSidebar.root) { return; }
     fileSidebar.token++;
     rememberFileTabs();
@@ -9594,7 +9645,7 @@
     // 手机上那一块铺满整屏、压根没有外面，所以只看浮着的那种。
     // 按下在哪儿得记一道：拖着什么东西松手也会有个 click，那个事件的位置在弹窗外面
     //（拖弹窗自己顶上那条就是这样），那不是“点了一下外面”，不许拿它关弹窗。
-    const KEEP_PATHS = "#fileStage, #fileSidebar, #fileSearchOverlay, a.file-link";
+    const KEEP_PATHS = "#fileStage, #fileSidebar, #fileSearchOverlay, a.file-link, .file-folder";
     let fileOutsideDown = null;
     document.addEventListener("pointerdown", (e) => {
       fileOutsideDown = { x: e.clientX, y: e.clientY };
@@ -9632,7 +9683,8 @@
       e.preventDefault();
       const path = a.getAttribute("data-file");
       if (!path) { return; }
-      openFileForUser(path, a.dataset.line ? parseInt(a.dataset.line, 10) : 0, a.getAttribute("data-dir") === "1");
+      openFileForUser(path, a.dataset.line ? parseInt(a.dataset.line, 10) : 0, undefined,
+        a.getAttribute("data-dir") === "1", { sessionId: fileSidebar.sessionId || activeId });
     });
     // 跟着刷新：开着而且有正看着的文件时，隔一会儿问一次（页面在后台时不问：手机上别白耗电）
     setInterval(() => {
@@ -9669,6 +9721,9 @@
     // 点了一个同名链接弹出来的：打开选中的那个时停在哪一行、头顶那一句说明
     line: 0,
     hint: "",
+    sessionId: null,
+    action: "view",
+    candidates: null,
   };
 
   /** 浮层只搭一次：第一次按快捷键（或者点放大镜）时建出来，以后就只开关。 */
@@ -9737,6 +9792,11 @@
     const prefill = opts && typeof opts.query === "string" ? opts.query : "";
     fileSearch.line = opts && Number(opts.line) > 0 ? Number(opts.line) : 0;
     fileSearch.hint = opts && opts.hint ? String(opts.hint) : "";
+    fileSearch.sessionId = opts && opts.sessionId || activeId;
+    fileSearch.action = opts && opts.action === "folder" ? "folder" : "view";
+    fileSearch.candidates = opts && Array.isArray(opts.candidates) ? opts.candidates.slice() : null;
+    fileSearch.textBtn.disabled = !!fileSearch.candidates;
+    fileSearch.root.querySelector("#fileSearchTitle").textContent = fileSearch.action === "folder" ? "选择文件所在目录" : "文件搜索";
     renderFileSearchHint();
     // 点同名链接弹出来的那次一定是找文件（不是搜内容），而且名字已经填好了
     if (prefill) { fileSearch.mode = "files"; }
@@ -9801,6 +9861,15 @@
     const query = fileSearch.input.value;
     fileSearch.seq += 1;
     fileSearch.want = fileSearch.seq;
+    // 候选已包含忽略目录里的真实路径：直接在这份列表中筛选，不再拿普通搜索把它们滤掉。
+    if (fileSearch.candidates) {
+      const q = query.trim().toLowerCase();
+      fileSearch.items = fileSearch.candidates.filter(path => path.toLowerCase().includes(q)).map(path => ({ path }));
+      fileSearch.sel = fileSearch.items.length ? 0 : -1;
+      if (fileSearch.items.length) { renderFileSearchItems(query, false); }
+      else { renderFileSearchNote("没有匹配的候选路径。"); }
+      return;
+    }
     if (mode === "text" && !query.trim()) {
       fileSearch.items = [];
       fileSearch.sel = -1;
@@ -9808,7 +9877,7 @@
       return;
     }
     // 旧结果先留着，新的回来再换：每敲一个字母就闪一下空白不好看
-    vscode.postMessage({ type: "findFiles", mode: mode, query: query, seq: fileSearch.seq });
+    vscode.postMessage({ type: "findFiles", mode, query, seq: fileSearch.seq, sessionId: fileSearch.sessionId });
   }
 
   /** 后端把这一次的结果送回来了（seq 对不上的——前面发的那几次——直接丢掉）。 */
@@ -9851,7 +9920,8 @@
     const frag = document.createDocumentFragment();
     fileSearch.items.forEach((item, idx) => {
       const row = document.createElement("div");
-      row.className = "fs-row" + (idx === fileSearch.sel ? " on" : "");
+      row.className = "fs-row" + (idx === fileSearch.sel ? " on" : "") + (fileSearch.candidates ? " fs-candidate" : "");
+      row.title = item.path;
       if (item.line) {
         // 内容那一档：上面一行是「路径:行号」，下面一行是那一行文字（命中处标出来）
         const head = document.createElement("div");
@@ -9932,12 +10002,17 @@
   }
 
   function chooseFileSearchItem(idx) {
+    if (!fileSearch.open) { return; }
     const item = fileSearch.items[idx];
     if (!item) { return; }
     // 内容那一档的结果自带行号；点同名链接弹出来的那次，停在那条链接说的行
     const line = item.line || fileSearch.line || 0;
+    const sessionId = fileSearch.sessionId;
+    const action = fileSearch.action;
     closeFileSearch();
-    openFileDirect(item.path, line, 0);
+    if (sessionId !== activeId) { return; }
+    if (action === "folder") { openFileForUser(item.path, 0, 0, false, { sessionId, action }); }
+    else { openFileDirect(item.path, line, 0, false, sessionId); }
   }
 
   /** pi /resume 列表的相对时间：now / 5m / 3h / 2d / 3w / 2mo / 1y。 */
@@ -11651,6 +11726,17 @@
     });
   }
 
+  // 所在目录按钮也会出现在文件弹窗里的 Markdown 中，统一在 document 委托。
+  document.addEventListener("click", e => {
+    const button = e.target.closest?.("button.file-folder");
+    if (!button || button.disabled) { return; }
+    e.preventDefault();
+    e.stopPropagation();
+    const pane = button.closest(".session-pane");
+    const sessionId = pane ? pane.dataset.sessionId : button.closest("#fileStage") ? fileSidebar.sessionId || activeId : activeId;
+    openFileForUser(button.dataset.file, 0, 0, false, { sessionId, action: "folder", button });
+  });
+
   // 委托：文件/符号链接点击（在 #messages 容器上）
   messagesEl.addEventListener("click", (e) => {
     const a = e.target.closest("a.file-link");
@@ -11660,7 +11746,7 @@
       openFileForUser(a.getAttribute("data-file"),
         a.dataset.line ? parseInt(a.dataset.line, 10) : undefined,
         a.dataset.col ? parseInt(a.dataset.col, 10) : undefined,
-        a.getAttribute("data-dir") === "1");
+        a.getAttribute("data-dir") === "1", { sessionId: a.closest(".session-pane")?.dataset.sessionId || activeId });
       return;
     }
     const s = e.target.closest("a.symbol-link");
@@ -12063,6 +12149,7 @@
     if (type === "openSettings") { openSettings(); return; }
     if (type === "findResults") { onFindResults(msg); return; }
     if (type === "pathCandidatesResult") { onPathCandidates(msg); return; }
+    if (type === "fileFolderResult") { onFileFolderResult(msg); return; }
     if (type === "viewOptionItems") { viewOptionItems = Array.isArray(msg.items) ? msg.items : []; renderViewOpts(); return; }
     // 后台命令清单的回话（问的那条见 requestBashTasks）：存给那个会话，再把它末尾那一块重画一遍
     if (type === "bashTasks") {

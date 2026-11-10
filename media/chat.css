@@ -308,6 +308,10 @@
   /* 正文内的文件路径可点击链接：跳转打开对应文件 */
   .file-link { color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .file-link:hover { text-decoration: underline; opacity: 0.85; }
+  .file-folder { display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 18px; margin-left: 3px; padding: 0; border: 0; border-radius: 3px; vertical-align: -3px; background: transparent; color: var(--vscode-textLink-foreground, #3794ff); opacity: 0.75; }
+  .file-folder svg { display: block; flex: none; width: 13px; height: 13px; }
+  .file-folder:hover:not(:disabled) { opacity: 1; background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.15)); }
+  .file-folder:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
   /* 函数/符号可点击链接：跳转到定义。用虚线下划点区别于文件链接 */
   .symbol-link { color: var(--vscode-textLink-foreground, #3794ff); text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
   .symbol-link:hover { text-decoration: underline; opacity: 0.85; }
@@ -2265,6 +2269,7 @@
   .fs-row:hover { background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.12)); }
   .fs-row.on { background: var(--vscode-list-activeSelectionBackground, #0078d4); color: var(--vscode-list-activeSelectionForeground, #fff); }
   .fs-file-line, .fs-text-head, .fs-text-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fs-candidate .fs-file-line { white-space: normal; overflow-wrap: anywhere; }
   .fs-dir { color: var(--vscode-descriptionForeground, inherit); }
   .fs-row.on .fs-dir { color: inherit; opacity: 0.8; }
   .fs-name { font-weight: 600; }

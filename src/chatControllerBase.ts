@@ -348,7 +348,7 @@ export abstract class ChatControllerBase implements RuntimeHost {
     protected machineLabelExample(): string { return ""; }
     // ---- 文件列表 / 文件打开（来自 webview 的 listFiles / openFile）----
     protected abstract sendFileList(): void;
-    protected abstract openFileFromWebview(p: string, line?: number, col?: number): void;
+    protected abstract openFileFromWebview(p: string, line?: number, col?: number, sessionId?: string): void;
 
     /** webview 首次就绪时调用（默认空，平台子类可覆盖以推送初始化数据）。 */
     protected onWebviewReady(): void {}
@@ -2389,7 +2389,8 @@ export abstract class ChatControllerBase implements RuntimeHost {
                     this.openFileFromWebview(
                         msg.path,
                         typeof msg.line === "number" ? msg.line : undefined,
-                        typeof msg.col === "number" ? msg.col : undefined
+                        typeof msg.col === "number" ? msg.col : undefined,
+                        typeof msg.sessionId === "string" ? msg.sessionId : undefined
                     );
                 }
                 return;
