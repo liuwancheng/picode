@@ -1,10 +1,6 @@
 /*
  * 把后端打成一个 Windows 单文件 exe：dist\PiChat.exe。
  *
- * 名字可以换：`npm run exe -- --name PiHarness` 打出来就是 dist\PiHarness.exe（默认还是 PiChat）。
- * 换了名字的那一份是另一个实例：壳按 exe 的名字分自己的解包目录与设置目录（%LOCALAPPDATA%\<名字>\），
- * 跟默认那份不抢后端，两份能并存着看（见 bin/launcher.cs）。
- *
  * 双击它就能起后端（托盘图标由后端自己拉起来，见 bin/tray.cs），不用在终端里敲 pichat。
  * 打进去的东西：
  *   - 一份壳（bin/launcher.cs，编出来是个窗口程序，天生没有黑框）；
@@ -33,20 +29,8 @@ const OUT_SERVER = path.join(repoRoot, "out", "server");
 const DIST = path.join(repoRoot, "dist");
 const WORK = path.join(DIST, "build");
 const BUNDLE = path.join(WORK, "bundle.cjs");
-
-/** 产物叫啥（不带 .exe）：默认 PiChat，`--name X` 可换。 */
-const NAME = (() => {
-    const args = process.argv.slice(2);
-    for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
-        if (arg === "--name" && args[i + 1]) { return args[i + 1].trim(); }
-        if (arg.startsWith("--name=")) { return arg.slice("--name=".length).trim(); }
-    }
-    return "PiChat";
-})();
-if (!NAME || /[\\/:*?"<>|]/.test(NAME)) { process.stderr.write("× exe 名字不能为空，也不能带 \\ / : * ? \" < > | 这些字。\n"); process.exit(1); }
-const EXE = path.join(DIST, `${NAME}.exe`);
-const ICO = path.join(WORK, `${NAME}.ico`);
+const EXE = path.join(DIST, "PiChat.exe");
+const ICO = path.join(WORK, "PiChat.ico");
 const PAYLOAD_TXT = path.join(WORK, "payload.txt");
 const FINGERPRINT_TXT = path.join(WORK, "fingerprint.txt");
 const PACKAGE_TXT = path.join(WORK, "package.json");
@@ -221,7 +205,7 @@ async function main() {
     try {
         fs.rmSync(EXE, { force: true });
     } catch {
-        fail(`${path.relative(repoRoot, EXE)} 正被占着（它还在跑）。先退出托盘菜单里那颗「退出」再打包。`);
+        fail("dist\\PiChat.exe 正被占着（它还在跑）。先退出托盘菜单里那颗「退出」再打包。");
     }
     problem = compileCsc(csc, EXE, LAUNCHER_SRC, [
         "-r:System.Windows.Forms.dll",
@@ -234,7 +218,7 @@ async function main() {
     const kb = fs.statSync(EXE).size / 1024;
     process.stdout.write(`\n好了：${path.relative(repoRoot, EXE)}（${kb.toFixed(0)} KB）\n`);
     process.stdout.write("双击它就会起后端、通知区域出那颗图标，并把页面打开。\n");
-    process.stdout.write(`（机器上得有 Node 20 或以上；找不到会弹一句提示。日志在 %LOCALAPPDATA%\\${NAME}\\pichat.log）\n`);
+    process.stdout.write("（机器上得有 Node 20 或以上；找不到会弹一句提示。日志在 %LOCALAPPDATA%\\PiChat\\pichat.log）\n");
 }
 
 main().catch((err) => fail(err?.stack || String(err)));
