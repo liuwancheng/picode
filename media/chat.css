@@ -230,18 +230,17 @@
     flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 1px;
     align-self: flex-start; margin-top: calc((0.9775em - 7px) / 2);
   }
-  /* 状态点：每一格身上常驻一颗。没在跑 = 绿点（不闪）；在跑 = 蓝点、呼吸（见下面 .streaming）。
-     所以一眼能看出谁在干活、谁闲着了。 */
+  /* 状态点：没在跑 = 红点（不闪）；在跑 = 绿点、呼吸（见下面 .streaming）。 */
   .sn-tab .sn-dot {
     flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
-    background: var(--vscode-charts-green, #89d185); display: inline-block;
+    background: var(--vscode-charts-red, #f14c4c); display: inline-block;
   }
   /* 小点下面那个数字：派出去的子会话还有几个在跑。零个时是空的（那一格整个收掉），
      所以没派活的时候还是原来那一颗点、位置也不变。字很小（9px），行高顶死，
-     不把顶条撑高。颜色用同一个蓝、只调淡一点：比上面那颗点浅，不抢它。 */
+     不把顶条撑高。颜色用同一个绿、只调淡一点：比上面那颗点浅，不抢它。 */
   .sn-tab .sn-count {
     font-size: 9px; line-height: 1; font-variant-numeric: tabular-nums;
-    color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 85%, transparent);
+    color: color-mix(in srgb, var(--vscode-charts-green, #89d185) 85%, transparent);
   }
   .sn-tab .sn-count:empty { display: none; }
   /* 名字后面那颗 ×（每格都露着）：点它关的就是这一格（点名字身上还是切过去 / 掉出清单）。
@@ -280,11 +279,10 @@
   .sn-tab.strip .sn-lines,
   .sn-tab.strip .sn-close,
   .sn-tab.strip .sn-count { display: none; }
-  /* 在跑（本会话，或者它派出去的子会话）：那颗点换成蓝的、呼吸一下。
-     不跑的时候就是上面那颗绿点（默认色）—— 两档，不多加别的。 */
+  /* 本会话、子会话或后台命令在跑时绿点呼吸；全部空闲时恢复红点。 */
   .sn-tab.streaming .sn-dot,
   .sn-tab.child-running .sn-dot {
-    background: var(--vscode-charts-blue, #3794ff);
+    background: var(--vscode-charts-green, #89d185);
     animation: pi-pulse 1.2s ease-in-out infinite;
     /* 呼吸只改这一颗的透明度：让它自己占一层，别带着整格（连那道阴影）每帧重画一遍。 */
     will-change: opacity;
@@ -1018,16 +1016,16 @@
   /* 一行里：小点 · 名字 · 标记 · 关闭叉（叉在最右边，不会跟名字挤在一起）。 */
   .pk-host.pk-drawer .pk-item.pk-open { display: flex; align-items: center; gap: 4px; }
   .pk-host.pk-drawer .pk-item.pk-open .pk-history-main { flex: 1 1 auto; min-width: 0; }
-  /* 行首一颗小点：在跑＝蓝点呼吸；跑完了＝绿点；出错＝红点；其余不显示。 */
+  /* 行首小点与会话格同色：在跑＝绿点呼吸；跑完或出错＝红点；已读闲置通知仍收起。 */
   .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot {
     flex: none; width: 7px; height: 7px; border-radius: 50%; margin-right: 2px;
     background: transparent; align-self: center;
   }
   .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot.running {
-    background: var(--vscode-charts-blue, #3794ff); animation: pi-pulse 1.2s ease-in-out infinite;
+    background: var(--vscode-charts-green, #89d185); animation: pi-pulse 1.2s ease-in-out infinite;
   }
-  .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot.error { background: var(--vscode-charts-red, #f14c4c); }
-  .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot.done { background: var(--vscode-charts-green, #89d185); }
+  .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot.error,
+  .pk-host.pk-drawer .pk-item.pk-open .pk-open-dot.done { background: var(--vscode-charts-red, #f14c4c); }
   /* 子会话：名字前面一个拐角箭头（“↳”），再把缩进减到一点点 ——
      箭头的竖笔就落在父会话那一行的左边缘下头，看着像从上面分出来的。 */
   .pk-host.pk-drawer .pk-item.pk-open-child { padding-left: 4px; }

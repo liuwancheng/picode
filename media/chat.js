@@ -958,7 +958,7 @@
       _stage: null,
       _stageDropped: false,
       streaming: false,
-      // 后台还有命令在跑（后端 sessionList 里那份）：这一轮答完了也算没干完，那颗点照旧蓝点呼吸。
+      // 后台还有命令在跑（后端 sessionList 里那份）：这一轮答完了也算没干完，那颗点照旧绿点呼吸。
       bashRunning: false,
       // 这个会话放到后台、还在跑的命令（后端那份清单里 status 是 running 的，新的排前面）。
       // 消息流末尾那一块画的就是它们（见 renderBashBlock）。
@@ -967,7 +967,7 @@
       bashBlock: null,
       // 那一块里「跑了多久」每半秒重写一次的定时器
       bashClock: 0,
-      // 这一轮跑完了（不管是你在看着它跑完的，还是在别处时它跑完的）：名字旁边那颗点变绿。
+      // 这一轮跑完了（不管是你在看着它跑完的，还是在别处时它跑完的）：名字旁边那颗点变红。
       // 看一眼（切到那个会话）或者又开始跑下一轮就收掉。见 markTurnDone。
       turnDone: false,
       activity: "idle",
@@ -1236,7 +1236,7 @@
 
   /**
    * 这个会话派出去的子会话里，有几个已经跑完了（第一轮结束、结果交回去了，会话还留着）。
-   * 顶条那颗小点用它：没有子会话在跑的时候点亮一颗绿点（不闪），一眼知道活干完了。
+   * 顶条那颗小点用它：没有子会话在跑的时候点亮一颗红点（不闪），一眼知道活干完了。
    */
   function doneChildCount(id) {
     let n = 0;
@@ -5260,7 +5260,7 @@
     if (!sessions.has(id) || activeId === id) { return; }
     hideTagTip();
     if (activeId !== null) { saveInputState(); } else { carryComposerToSession(id); }
-    // 切走也算看过了：刚看完的那个会话的绿点收掉（绿点只说“这一轮刚跑完，等你回来”）
+    // 切走也算看过了：刚看完的那个会话的完成通知收掉（只说“这一轮刚跑完，等你回来”）
     const leaving = activeId !== null ? sessions.get(activeId) : null;
     if (leaving && leaving.turnDone) { leaving.turnDone = false; }
     activeId = id;
@@ -5268,7 +5268,7 @@
     resetFileSidebarForSession();
     // 底下那一块看的是这个会话目录跟最后一次提交差了什么：也跟着换（开着才重问）
     resetChangeSheetForSession();
-    // 看过了：那颗“这一轮跑完了”的小绿点收掉
+    // 看过了：那颗“这一轮跑完了”的通知点收掉
     const shown = sessions.get(id);
     if (shown && shown.turnDone) { shown.turnDone = false; }
     mountActiveSession();
@@ -5334,7 +5334,7 @@
 
   /**
    * 「正在对话」这些行列首那颗小点的样式名（顶条下拉框与面板共用同一套）：
-   * 在跑（这一轮在答、或者后台还有命令在跑）＝蓝点呼吸，出错＝红点，跑完了＝绿点不闪（主会话、子会话都是），
+   * 在跑（这一轮在答、或者后台还有命令在跑）＝绿点呼吸，出错或跑完了＝红点不闪（主会话、子会话都是），
    * 其余不显示。
    */
   function openDotClass(item) {
@@ -11799,7 +11799,7 @@
     // 这一轮跑完：生成中不补的那一截（见 syncViewport）现在补上——人要是正停在那片空白里，
     // 不该非得再滚一下才看见东西
     if (!on && st.older && st.older.length) { scheduleViewportCheck(st); }
-    // 又开始跑下一轮：上一轮那颗绿点收掉（绿点只说“这一轮跑完了”）
+    // 又开始跑下一轮：上一轮的完成通知收掉（只说“这一轮跑完了”）
     if (on) { st.turnDone = false; }
     // 这一轮跑完：还在留的那条位置到此为止（一轮里最后调的是工具、后面没再出正文时，就靠这一下收）
     if (!on) { endRunningLine(st); }
@@ -12087,7 +12087,7 @@
     // parentId 判会赶不上——那时它的壳已经不在了。
     if (type === "turnEnd") {
       if (msg.child === true) { return; }
-      // 绿点只说“这一轮跑完了”：自己按 Esc 停掉的那一轮不算，不绿
+      // 完成通知只说“这一轮跑完了”：自己按 Esc 停掉的那一轮不算
       const done = msg.sessionId && msg.status === "done" ? sessions.get(msg.sessionId) : null;
       if (done) { markTurnDone(done); }
       return;

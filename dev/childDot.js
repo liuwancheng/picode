@@ -1,23 +1,23 @@
 // @ts-nocheck
 /**
  * childDot —— 验顶条中间那颗会话名上的小点：本会话自己闲着、派出去的子会话还在跑时，
- * 那颗蓝点也亮着、也呼吸（以前只在本会话自己答的时候才亮），点下面那个小数字写着
- * 还有几个子会话在跑（零个时数字收起来、点也不亮）；子会话跑完了（结果已交回）、又没有
- * 谁在跑时，同一颗点换成绿的、不闪；本会话自己这一轮跑完了（你正看着它跑完）也是绿点。
- * 后台还有命令在跑也一样算没干完：这一轮答完了那颗点照旧蓝点呼吸，命令跑完了才变绿，
+ * 那颗绿点也亮着、也呼吸，点下面那个小数字写着还有几个子会话在跑。
+ * 子会话跑完了（结果已交回）、又没有谁在跑时，同一颗点换成红的、不闪；
+ * 本会话自己这一轮跑完了也是红点。后台还有命令在跑也一样算没干完：
+ * 这一轮答完了那颗点照旧绿点呼吸，命令跑完了才变红，
  * 那一格上也一样要点两下才能关（见最后那块）。
  *
  * 只要验前端画得对不对，所以不真派子会话：直接往页面里投假的 sessionList
  * （跟后端推的是同一种消息）。六种情形各看一眼，类名 / 显示 / 动画 / 那个数字都打成文字，各裁一张小图：
  *   1 子会话在跑（running）        → 亮、呼吸、写 1
  *   2 刚派出去、任务还没发（starting）→ 亮、呼吸、写 1
- *   3 子会话跑完等着（waiting）    → 绿点、不闪、没数字
- *   4 子会话在跑 + 别的会话跑完了 → 亮、呼吸、写 1（呼吸优先，不被别的会话那颗绿点顶掉）
- *   5 本会话自己在跑                → 亮、呼吸、没数字（数字只算子会话）
- *   6 两个子会话在跑 + 一个在等    → 亮、呼吸、写 2
- *   7 本会话这一轮跑完了（turnEnd done）→ 绿点、不闪、没数字
- *   8 跑完了、后台还有命令在跑   → 亮、呼吸、没数字（蓝点盖过那颗“跑完了”的绿点）
- *   9 那条后台命令也跑完了       → 绿点、不闪（这一轮确实是干完了）
+ *   3 子会话跑完等着（waiting）    → 红点、不闪、没数字
+ *   4 子会话在跑 + 别的会话跑完了 → 绿点、呼吸、写 1
+ *   5 本会话自己在跑                → 绿点、呼吸、没数字（数字只算子会话）
+ *   6 两个子会话在跑 + 一个在等    → 绿点、呼吸、写 2
+ *   7 本会话这一轮跑完了（turnEnd done）→ 红点、不闪、没数字
+ *   8 跑完了、后台还有命令在跑   → 绿点、呼吸、没数字
+ *   9 那条后台命令也跑完了       → 红点、不闪（这一轮确实是干完了）
  * 最后再量一下位置：那颗点与箭头是贴着“会话名 + 目录两行”整体居中的，
  * 不是只贴着会话名那一行（目录行收起来时它们才回到名字上）；有数字的时候
  * 是“点 + 数字”这一小竖条一起居中，数字落在点的正下面。
@@ -40,7 +40,7 @@ function session(over) {
     title: "",
     parentId: null,
     streaming: false,
-    // 后台还有命令在跑（后端 sessionList 里那份）：这一轮答完了也算没干完，那颗点照旧蓝点呼吸
+    // 后台还有命令在跑：这一轮答完了也算没干完，那颗点照旧绿点呼吸
     bashRunning: false,
     loading: false,
     activity: "idle",
@@ -132,14 +132,14 @@ module.exports = async (page) => {
     },
     {
       id: "3-child-waiting", what: "子会话跑完等着",
-      want: { visible: true, animation: "none", count: "", bg: "green" },
+      want: { visible: true, animation: "none", count: "", bg: "red" },
       sessions: [session(), child("waiting", { streaming: false, activity: "idle" })],
     },
     {
       id: "4-child-running-other-done", what: "子会话在跑 + 别的会话跑完了",
       want: { visible: true, animation: "pi-pulse", count: "1" },
       sessions: [session(), child("running"), other()],
-      // 别的会话跑完一轮：它那一行变绿，但顶条这颗只看当前会话（p1），照旧蓝点呼吸
+      // 别的会话跑完一轮变红；当前会话的子会话还在跑，照旧绿点呼吸
       extra: [{ type: "turnEnd", sessionId: "p2", status: "done", text: "跑完了一轮" }],
     },
     {
@@ -159,22 +159,22 @@ module.exports = async (page) => {
     },
     {
       id: "7-self-done", what: "本会话这一轮跑完了",
-      want: { visible: true, animation: "none", count: "", bg: "green" },
+      want: { visible: true, animation: "none", count: "", bg: "red" },
       sessions: [session()],
-      // 跑完一轮的通知：现在不管当时看着哪个会话都是绿点
+      // 跑完一轮的通知：现在不管当时看着哪个会话都是红点
       extra: [{ type: "turnEnd", sessionId: "p1", status: "done", text: "跑完了一轮" }],
     },
     {
       id: "8-bash-running", what: "跑完了、后台还有命令在跑",
       want: { visible: true, animation: "pi-pulse", count: "", titleHas: "后台还有命令在跑" },
       sessions: [session({ bashRunning: true })],
-      // 这一轮已经答完、结果交回了，后台那条命令还在跑：算没干完，那颗点照旧蓝点呼吸
+      // 这一轮答完了，后台命令还在跑：绿点照旧呼吸
       extra: [{ type: "turnEnd", sessionId: "p1", status: "done", text: "跑完了一轮" }],
     },
     {
       id: "9-bash-done", what: "那条后台命令也跑完了",
-      want: { visible: true, animation: "none", count: "", bg: "green" },
-      // 命令跑完：后端重推一份会话清单（bashRunning 变 false），这会儿才换成绿点
+      want: { visible: true, animation: "none", count: "", bg: "red" },
+      // 后台命令也跑完，重推会话清单后换成红点
       sessions: [session()],
     },
   ];
@@ -184,11 +184,12 @@ module.exports = async (page) => {
     await inject(c.sessions, c.extra);
     const got = await dotState();
     const rgb = (got.bg.match(/\d+/g) || []).map(Number);
-    // 主题变量各套不一样（VS Code 的深/浅色、假主题各是一份），所以只认“绿”这个方向：G 通道最大
+    // 不绑定主题的具体 RGB：运行看绿色通道，空闲看红色通道。
     const isGreen = rgb.length >= 3 && rgb[1] > rgb[0] && rgb[1] > rgb[2];
+    const isRed = rgb.length >= 3 && rgb[0] > rgb[1] && rgb[0] > rgb[2];
     const ok = got.visible === c.want.visible && got.animation === c.want.animation
       && got.count === c.want.count && got.countVisible === (c.want.count !== "")
-      && (c.want.bg === undefined || (c.want.bg === "green" ? isGreen : got.bg === c.want.bg))
+      && (c.want.animation === "pi-pulse" ? isGreen : isRed)
       && (c.want.count === "" || got.title.includes(c.want.count + " 个子会话在跑"))
       && (!c.want.titleHas || got.title.includes(c.want.titleHas));
     if (!ok) { bad++; }
@@ -200,7 +201,7 @@ module.exports = async (page) => {
     );
   }
 
-  // ---- 绿点看一眼就收：「项目与会话」里那一行行首的点（顶条每一格自己那颗点是常驻绿的，没这回事）----
+  // ---- 列表里的完成通知看过就收；顶条的红色空闲点仍常驻 ----
   const post = async (messages) => {
     await page.eval(`for (const m of ${JSON.stringify(messages)}) { window.postMessage(m, "*"); } return true;`);
     await page.sleep(250);
@@ -236,11 +237,11 @@ module.exports = async (page) => {
   await post([{ type: "sessionActivated", sessionId: "p1" }]);
   const doneAfter = await rowDotClass("主会话");
   {
-    const greenBefore = /\bdone\b/.test(doneBefore);
-    const ok = greenBefore && !/\b(done|running|error)\b/.test(doneAfter);
+    const doneMarked = /\bdone\b/.test(doneBefore);
+    const ok = doneMarked && !/\b(done|running|error)\b/.test(doneAfter);
     if (!ok) { bad++; }
     console.log(
-      `${ok ? "√" : "×"} 看完就收：跑完时${greenBefore ? "亮绿点" : `却是「${doneBefore || "不亮"}」`}，` +
+      `${ok ? "√" : "×"} 看完就收：跑完时${doneMarked ? "亮红点" : `却是「${doneBefore || "不亮"}」`}，` +
       `切到别的会话再切回来${/\b(done|running|error)\b/.test(doneAfter) ? `还亮着（「${doneAfter}」）` : "就不亮了"}`
     );
   }
@@ -299,7 +300,7 @@ module.exports = async (page) => {
     );
   }
 
-  // ---- 「项目与会话」面板里的行首点：跑完了（子会话、别的会话）都该是绿的，后台还在跑的那个是蓝的，当前在跑的那个不绿 ----
+  // ---- 会话列表：运行绿点、完成红点，已读的空闲完成通知仍收起 ----
   await inject([session(), child("waiting", { streaming: false, activity: "idle" }), other(),
     other({ id: "p3", name: "后台还在跑", bashRunning: true })],
   [{ type: "turnEnd", sessionId: "p2", status: "done", text: "跑完了一轮" }]);
@@ -317,6 +318,8 @@ module.exports = async (page) => {
     if (n > 0) { break; }
     await page.sleep(250);
   }
+  // 用同样的会话行渲染器投一份纯假列表，避免后端工作区回应覆盖这些不存在的会话。
+  await post([{ type: "picker", kind: "history", items: [] }]);
   const panelDots = JSON.parse(await page.eval(`
     return JSON.stringify(Array.from(document.querySelectorAll(".pk-item.pk-open")).map((row) => {
       const el = row.querySelector(".pk-open-dot");
@@ -328,23 +331,23 @@ module.exports = async (page) => {
     }));
   `));
   {
-    // 跑完的那两行（子会话、别的会话）该是绿点；后台还在跑的那一行跟“正在答”一样是蓝点（也在呼吸）；
+    // 跑完的两行是红点；后台还在跑的那一行是绿点呼吸；
     // 当前这个（p1，正看着、没在跑也没后台命令）不该亮
     const want = { "侦察: 认证模块": "done", "另一个会话": "done", "后台还在跑": "running", "主会话": "" };
     for (const [name, kind] of Object.entries(want)) {
       const row = panelDots.find((r) => r.name === name);
       const rgb2 = ((row && row.bg || "").match(/\d+/g) || []).map(Number);
       const isGreen = rgb2.length >= 3 && rgb2[1] > rgb2[0] && rgb2[1] > rgb2[2];
-      const isBlue = rgb2.length >= 3 && rgb2[2] > rgb2[0] && rgb2[2] > rgb2[1];
+      const isRed = rgb2.length >= 3 && rgb2[0] > rgb2[1] && rgb2[0] > rgb2[2];
       const cls = row ? row.cls : "";
-      const ok = !!row && (kind === "done" ? isGreen && /\bdone\b/.test(cls)
-        : kind === "running" ? isBlue && /\brunning\b/.test(cls)
+      const ok = !!row && (kind === "done" ? isRed && /\bdone\b/.test(cls)
+        : kind === "running" ? isGreen && /\brunning\b/.test(cls)
           : !/\b(done|running|error)\b/.test(cls));
       if (!ok) { bad++; }
       console.log(
         `${ok ? "√" : "×"} 面板里「${name}」那一行行首的点：` +
-        (row ? `${/\b(done|running|error)\b/.test(cls) ? `亮${isGreen ? "绿" : isBlue ? "蓝" : "的却是 " + row.bg}` : "不亮"}（类名 "${cls}"）` : "没有这一行") +
-        `，期望${{ done: "绿点", running: "蓝点呼吸", "": "不亮" }[kind]}`
+        (row ? `${/\b(done|running|error)\b/.test(cls) ? `亮${isGreen ? "绿" : isRed ? "红" : "的却是 " + row.bg}` : "不亮"}（类名 "${cls}"）` : "没有这一行") +
+        `，期望${{ done: "红点", running: "绿点呼吸", "": "不亮" }[kind]}`
       );
     }
   }
