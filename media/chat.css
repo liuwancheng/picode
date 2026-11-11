@@ -718,6 +718,15 @@
   .tag-tip .et-jump svg { width: 1em; height: 1em; display: inline-block; vertical-align: -0.125em; }
   .tag-tip .et-revert:hover,
   .tag-tip .et-jump:hover { background: var(--vscode-button-hoverBackground, rgba(128,128,128,0.4)); }
+  /* 每一条标题行右边的「复制」：一颗小图标按钮，跟代码块那颗同款；平常淡着，鼠标放上去才亮 */
+  .tag-tip .tip-copy {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; padding: 0; border-radius: 3px; cursor: pointer;
+    font-family: var(--vscode-font-family); font-size: 0.9em; line-height: 1;
+    background: transparent; color: inherit; border: 1px solid transparent; opacity: 0.6;
+  }
+  .tag-tip .tip-copy svg { width: 1em; height: 1em; display: block; }
+  .tag-tip .tip-copy:hover { opacity: 1; background: var(--vscode-button-hoverBackground, rgba(128,128,128,0.4)); }
   .tag-tip .tc-args { margin: 6px 0 0; max-height: 300px; overflow: auto; color: var(--vscode-descriptionForeground, #808080); }
   .tag-tip .tc-trunc-hint { margin-top: 4px; font-size: 0.8em; opacity: 0.75; cursor: default; color: var(--vscode-descriptionForeground); }
   .tag-tip .edit-diff { margin-top: 6px; }

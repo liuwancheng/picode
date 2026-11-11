@@ -350,6 +350,28 @@
     });
   }
   const CODE_COPY_ICON = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
+  /** 把文字放进剪贴板（成没成回一个布尔）：先走 Clipboard API；局域网 HTTP 下没有它，
+   *  退回浏览器这次点击里的复制命令。代码块那颗按钮与提示框里的复制共用这一份。 */
+  async function copyForUser(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch { /* 见下：换条路再试，不行就如实报失败。 */ }
+    const focus = document.activeElement;
+    const sel = window.getSelection();
+    const ranges = sel ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i).cloneRange()) : [];
+    const input = document.createElement("textarea");
+    input.value = text;
+    input.style.cssText = "position:fixed;left:-9999px;top:0";
+    document.body.appendChild(input);
+    input.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch { /* 显示失败反馈，不假报成功。 */ }
+    input.remove();
+    focus?.focus({ preventScroll: true });
+    if (sel) { sel.removeAllRanges(); for (const range of ranges) { sel.addRange(range); } }
+    return copied;
+  }
   document.addEventListener("click", async (e) => {
     const btn = e.target.closest?.(".code-copy");
     if (!btn || btn.disabled) { return; }
@@ -358,25 +380,7 @@
     e.preventDefault();
     e.stopPropagation();
     btn.disabled = true;
-    let copied = false;
-    try {
-      await navigator.clipboard.writeText(code.textContent);
-      copied = true;
-    } catch {
-      // 局域网 HTTP 没有 Clipboard API，仍可在这次点击里走浏览器的复制命令。
-      const focus = document.activeElement;
-      const sel = window.getSelection();
-      const ranges = sel ? Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i).cloneRange()) : [];
-      const input = document.createElement("textarea");
-      input.value = code.textContent;
-      input.style.cssText = "position:fixed;left:-9999px;top:0";
-      document.body.appendChild(input);
-      input.select();
-      try { copied = document.execCommand("copy"); } catch { /* 显示失败反馈，不假报成功。 */ }
-      input.remove();
-      focus?.focus({ preventScroll: true });
-      if (sel) { sel.removeAllRanges(); for (const range of ranges) { sel.addRange(range); } }
-    }
+    const copied = await copyForUser(code.textContent);
     btn.innerHTML = copied ? "✓" : "!";
     btn.title = btn.ariaLabel = copied ? "已复制" : "复制失败，请手动选择代码复制";
     setTimeout(() => {
@@ -2951,8 +2955,17 @@
       // write / edit 那一条自带一块画法（文件名 + diff + 按钮）：整块交给它自己画
       if (e.tipFill) { e.tipFill(content, i > 0); return; }
       const call = document.createElement("div");
-      call.className = "tag-tip-call tag-tip-click" + (i > 0 ? " tag-tip-call-next" : "");
-      call.textContent = e.tipCall || e.name;
+      call.className = "tag-tip-call tag-tip-click tag-tip-head" + (i > 0 ? " tag-tip-call-next" : "");
+      const title = document.createElement("span");
+      title.className = "tag-tip-title";
+      title.textContent = e.tipCall || e.name;
+      call.appendChild(title);
+      // 这一条的全文可能还留在后端（只留了字数）：点复制就先去取，取到了再复制（见 tipCopyButton）
+      call.appendChild(tipCopyButton(e.clip, () => e.resultText || e.tipCall || "", () => {
+        e.expanded = true;
+        startClipPump(g.tag);
+        repaintTagTip(g.tag);
+      }));
       call.addEventListener("click", (ev) => {
         ev.stopPropagation();   // 别让“点外头收起”那个监听当场把提示框关掉
         e.expanded = !e.expanded;
@@ -3940,6 +3953,57 @@
     tagTipAnchor = null;
     if (tagTipEl) { tagTipEl.classList.add("hidden"); }
   }
+  /** 点了「复制」才去取全文的那一条（见 tipCopyButton）：全文到了就替用户复制上。
+   *  按钮每次重画都是新的（提示框内容一变就整套重建）：换掉的那颗就算了，字照样放进剪贴板，
+   *  只是没机会打那个勾。 */
+  function copyIfWanted(clip, text) {
+    if (!clip || !clip.copyPending) { return; }
+    clip.copyPending = false;
+    if (!text) { return; }
+    if (clip.copyBtn && clip.copyBtn.isConnected) { copyTipText(clip.copyBtn, text); }
+    else { copyForUser(text); }
+  }
+
+  /** 提示框里一条标题行右边的「复制」：复制这一条的全文（思考 / 输出；还没有输出的复制那一行调用）。
+   *  全文还在后端（只留了字数）的，先铺开去取，取到了替用户复制上（见 copyIfWanted）。
+   *  clip：这一条“没带全”的记号（没有就 null）；text：要复制的字；fetch：铺开这一条并去后端要全文。 */
+  function tipCopyButton(clip, text, fetch) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tip-copy";
+    btn.title = btn.ariaLabel = "复制内容";
+    btn.innerHTML = CODE_COPY_ICON;
+    // 刚点过、正在取全文的（重画时落回这一颗）：照着那个状态画
+    if (clip && clip.copyPending) { btn.title = btn.ariaLabel = "正在取回全文…"; }
+    btn.addEventListener("click", (ev) => {
+      ev.stopPropagation();   // 别把这一下当成“铺开 / 收起”点（见 chat.css 的 .tag-tip-click）
+      if (clip && !clip.loaded && !clip.failed) {
+        clip.copyBtn = btn;
+        clip.copyPending = true;   // 取到了就复制（见 details 那条消息）
+        btn.title = btn.ariaLabel = "正在取回全文…";
+        fetch();
+        return;
+      }
+      copyTipText(btn, text());
+    });
+    return btn;
+  }
+
+  /** 复制那一下的反馈：成功打个勾，失败说清得自己选，1.5 秒后复原。 */
+  async function copyTipText(btn, text) {
+    if (btn.disabled) { return; }
+    if (!text) { btn.title = btn.ariaLabel = "这一条没有内容可复制"; return; }
+    btn.disabled = true;
+    const ok = await copyForUser(text);
+    btn.innerHTML = ok ? "✓" : "!";
+    btn.title = btn.ariaLabel = ok ? "已复制" : "复制失败，请手动选择内容复制";
+    setTimeout(() => {
+      btn.innerHTML = CODE_COPY_ICON;
+      btn.title = btn.ariaLabel = "复制内容";
+      btn.disabled = false;
+    }, 1500);
+  }
+
   /** 把标签的调用与结果填进内容区：调用一行稍深底色（输入），结果原样（输出）。
    *  打开时只画输入；点那一行才铺开它自己的结果（输出）—— 见 chat.css 的 .tag-tip-click。 */
   function fillTagTip(tag) {
@@ -3947,12 +4011,20 @@
     // 自定义内容钩子（write / edit 那一条用：标题行 + diff / 写入预览 + 跳转 / 回滚按钮）
     if (tag._tipFill) { tag._tipFill(tagTipContent); return; }
     const call = document.createElement("div");
-    call.className = "tag-tip-call";
-    call.textContent = tag._tipCall || "";
     // 这一条有输出可铺（拿到结果了、拿到的只是开头、或者还在跑）才让它点：没有的话点了什么都不会发生，
     // 别给一只手形光标（「正在跑的那一条」那个提示框就是只有一行字的那种）
-    if (tag._tipBody || tag._resultClip || tag._done === false) {
-      call.className += " tag-tip-click";
+    const expandable = !!(tag._tipBody || tag._resultClip || tag._done === false);
+    call.className = "tag-tip-call tag-tip-head" + (expandable ? " tag-tip-click" : "");
+    const title = document.createElement("span");
+    title.className = "tag-tip-title";
+    title.textContent = tag._tipCall || "";
+    call.appendChild(title);
+    call.appendChild(tipCopyButton(tag._resultClip, () => tag._resultText || tag._tipCall || "", () => {
+      tag._expanded = true;
+      startClipPump(tag);
+      repaintTagTip(tag);
+    }));
+    if (expandable) {
       call.addEventListener("click", (e) => {
         e.stopPropagation();   // 别让下面那个“点外头收起”的监听当场把它关掉
         tag._expanded = !tag._expanded;
@@ -13036,6 +13108,7 @@
               e.tipCall = tagTipCallText(e.name, text);
               if (e.applyArgs) { e.applyArgs(text); }
             });
+            copyIfWanted(e.clip, e.resultText || e.tipCall);
           }
         } else {
           apply(open._resultClip, (text) => { open._resultText = text; setTagTip(open, text, ""); });
@@ -13043,6 +13116,7 @@
             open._argStr = text;
             open._tipCall = tagTipCallText(open._toolName, text);
           });
+          copyIfWanted(open._resultClip, open._resultText || open._tipCall);
         }
         refreshTagTipIfShowing(open);
         if (!clipNeedsMore(open)) { stopClipPump(); }

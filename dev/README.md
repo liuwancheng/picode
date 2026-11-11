@@ -85,6 +85,11 @@ npm run web:shot -- --width 1000 --height 760 --script dev/toolMerge.js
 # write / edit 点标题行才画 diff / 写入预览；关掉再点开又是只画输入）：
 npm run web:shot -- --width 1000 --height 760 --script dev/toolTipExpand.js
 
+# 验提示框里每一条标题行右边的「复制」（think 这类条目看完全文不用自己拿鼠标划着选）：
+# 一行一颗、点它不会把那一行当成展开 / 收起点、复制到的就是这一条的原样文字（换行也在）；
+# 全文还留在后端的那一条点一下先去取、取到了自动复制上（假数据，不调模型）：
+npm run web:shot -- --width 1000 --height 760 --script dev/tipCopy.js
+
 # 验看图那一层（点开带图的工具结果后还能放大缩小）：滚轮定点缩放、手机上两指捏合、
 # 放大后按住拖动、双击还原、Esc 关掉（且不顺手停掉正在生成的那一轮）、没放大时点图本身照旧关：
 npm run web:shot -- --width 1000 --height 760 --script dev/lightboxZoom.js
